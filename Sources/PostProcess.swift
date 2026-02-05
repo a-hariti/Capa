@@ -42,14 +42,16 @@ enum PostProcess {
   static func addMasterAudioTrackIfNeeded(
     url: URL,
     includeSystemAudio: Bool,
-    includeMicrophone: Bool
+    includeMicrophone: Bool,
+    forceMaster: Bool = false
   ) async throws {
     let asset = AVURLAsset(url: url)
     let audioTracks = try await asset.loadTracks(withMediaType: .audio)
     let plan = planForTracks(audioTracks, includeSystemAudio: includeSystemAudio, includeMicrophone: includeMicrophone)
     guard plan.wantsMaster else { return }
-    // If there's only one source track, skip the master mix and keep the original audio as-is.
-    guard plan.sources.count > 1 else { return }
+    // If there's only one source track, skip the master mix unless a caller needs it
+    // (e.g. for cross-file alignment when recording multiple video sources).
+    guard forceMaster || plan.sources.count > 1 else { return }
 
     let tmpURL = url.deletingLastPathComponent()
       .appendingPathComponent(".capa-tmp-\(UUID().uuidString).mov")

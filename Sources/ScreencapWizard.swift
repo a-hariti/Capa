@@ -46,7 +46,7 @@ struct Capa: AsyncParsableCommand {
   @Flag(name: .customLong("vfr"), help: "Keep variable frame rate (skip CFR post-process)")
   var keepVFR = false
 
-  @Option(name: .customLong("fps"), help: "Post-process to constant frame rate (default: 60 fps)")
+  @Option(name: .customLong("fps"), help: "Post-process SCREEN recording to constant frame rate (default: 60 fps)")
   var fps: Int?
 
   @Option(name: .customLong("codec"), help: "Video codec (h264|hevc)")
@@ -309,17 +309,26 @@ struct Capa: AsyncParsableCommand {
     try? FileManager.default.createDirectory(at: recsDir, withIntermediateDirectories: true)
 
     let outFile: URL
+    let cameraOutFile: URL?
     if let outputPath = outputPath {
       let u = URL(fileURLWithPath: outputPath)
       if u.pathExtension.isEmpty {
         try? FileManager.default.createDirectory(at: u, withIntermediateDirectories: true)
         outFile = u.appendingPathComponent("screen-\(ts).mov")
+        cameraOutFile = includeCamera ? u.appendingPathComponent("camera-\(ts).mov") : nil
       } else {
         try? FileManager.default.createDirectory(at: u.deletingLastPathComponent(), withIntermediateDirectories: true)
         outFile = u
+        if includeCamera {
+          let base = u.deletingPathExtension().lastPathComponent
+          cameraOutFile = u.deletingLastPathComponent().appendingPathComponent(base + "-camera.mov")
+        } else {
+          cameraOutFile = nil
+        }
       }
     } else {
       outFile = recsDir.appendingPathComponent("screen-\(ts).mov")
+      cameraOutFile = includeCamera ? recsDir.appendingPathComponent("camera-\(ts).mov") : nil
     }
 
     let hasMic = includeMic
@@ -341,6 +350,7 @@ struct Capa: AsyncParsableCommand {
       height: geometry.pixelHeight,
       includeCamera: includeCamera,
       cameraDeviceID: cameraDevice?.uniqueID,
+      cameraOutputURL: cameraOutFile,
       onAudioLevel: onAudioLevel
     )
     let recorder = ScreenRecorder(filter: filter, options: recorderOptions)
@@ -349,9 +359,12 @@ struct Capa: AsyncParsableCommand {
     print("Settings:")
     print("  Video: \(codecName) \(geometry.pixelWidth)x\(geometry.pixelHeight) @ native refresh")
     if keepVFR {
-      print("  Timing: VFR")
+      print("  Screen timing: VFR")
     } else {
-      print("  Timing: CFR \(cfrFPS ?? 60) fps")
+      print("  Screen timing: CFR \(cfrFPS ?? 60) fps")
+    }
+    if includeCamera {
+      print("  Camera timing: native (no CFR)")
     }
     if includeMic, let audioDevice {
       print("  Microphone: \(audioDevice.localizedName)")
@@ -364,7 +377,10 @@ struct Capa: AsyncParsableCommand {
       print("  Camera: none")
     }
     print("  System audio: \(includeSystemAudio ? "on" : "off")")
-    print("Output file: \(outFile.path)")
+    print("Output (screen): \(outFile.path)")
+    if let cameraOutFile {
+      print("Output (camera): \(cameraOutFile.path)")
+    }
     let canReadKeys = Terminal.isTTY(STDIN_FILENO)
     if canReadKeys {
       print("Recording... press 'q' to stop.")
@@ -440,14 +456,25 @@ struct Capa: AsyncParsableCommand {
       try await PostProcess.addMasterAudioTrackIfNeeded(
         url: outFile,
         includeSystemAudio: includeSystemAudio,
-        includeMicrophone: includeMic
+        includeMicrophone: includeMic,
+        forceMaster: includeCamera
       )
     } catch {
       print("Warning: failed to post-process audio tracks: \(error)")
     }
 
+    if includeCamera, let cameraOutFile {
+      do {
+        // Ensure the camera file has its own audio first, and the screen's "Master (Mixed)" as a secondary
+        // alignment reference (perfect sync for multi-cam editing).
+        try await AlignmentMux.addMasterAlignmentTrack(cameraURL: cameraOutFile, screenURL: outFile)
+      } catch {
+        print("Warning: failed to add alignment track to camera recording: \(error)")
+      }
+    }
+
     if let cfrFPS {
-      print("Post-processing video to \(cfrFPS) fps...")
+      print("Post-processing screen video to \(cfrFPS) fps...")
       do {
         try await VideoCFR.rewriteInPlace(url: outFile, fps: cfrFPS)
       } catch {
@@ -456,16 +483,16 @@ struct Capa: AsyncParsableCommand {
     }
 
     if includeSystemAudio || includeMic {
+      let screenHasMaster = (includeSystemAudio || includeMic) && (includeCamera || (includeSystemAudio && includeMic))
       var parts: [String] = []
-      if includeSystemAudio && includeMic {
-        parts.append("qaa=Master (mixed)")
-      }
+      if screenHasMaster { parts.append("qaa=Master (mixed)") }
       if includeMic { parts.append("qac=Mic") }
       if includeSystemAudio { parts.append("qab=System") }
       print("Audio tracks (language tags): " + parts.joined(separator: ", "))
     }
-    if includeCamera {
-      print("Video tracks: v0=Screen, v1=Camera")
+    if includeCamera, cameraOutFile != nil {
+      print("Video files: screen=\(outFile.lastPathComponent), camera=\(cameraOutFile!.lastPathComponent)")
+      print("Camera file audio: a0=Mic (if enabled), a1=Master (mixed, for alignment)")
     }
     print("")
     let shouldOpen: Bool
