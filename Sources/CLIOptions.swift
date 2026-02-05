@@ -18,6 +18,9 @@ struct CLIOptions: Sendable {
   /// Capture system audio to a separate track.
   var includeSystemAudio = false
 
+  /// Post-process video into CFR at the given FPS (e.g. 60). `nil` means keep VFR.
+  var cfrFPS: Int?
+
   var codec: AVVideoCodecType?
   /// `0` means "native refresh rate" (passes `kCMTimeZero` to ScreenCaptureKit).
   var fps: Int = 60
@@ -113,6 +116,25 @@ struct CLIOptions: Sendable {
 
       if a == "--system-audio" {
         out.includeSystemAudio = true
+        i += 1
+        continue
+      }
+
+      if a == "--cfr" {
+        // Optional value; default to 60.
+        if i + 1 < argv.count, !argv[i + 1].hasPrefix("-") {
+          let v = try parseInt(try takeValue(argv, &i), a)
+          out.cfrFPS = max(1, min(240, v))
+          i += 1
+        } else {
+          out.cfrFPS = 60
+          i += 1
+        }
+        continue
+      }
+      if a.hasPrefix("--cfr=") {
+        let v = try parseInt(String(a.split(separator: "=", maxSplits: 1)[1]), "--cfr")
+        out.cfrFPS = max(1, min(240, v))
         i += 1
         continue
       }
@@ -233,6 +255,7 @@ struct CLIOptions: Sendable {
       --mic-index N                   Select microphone by index (from --list-mics)
       --mic-id ID                     Select microphone by AVCaptureDevice.uniqueID
       --system-audio                  Capture system audio to a separate track
+      --cfr[=N]                       Post-process to constant frame rate (default: 60 fps)
       --codec h264|hevc               Video codec (default: prompt / h264)
       --fps N                         Capture update rate hint (0=native refresh, default: 60)
       --duration SECONDS              Auto-stop after N seconds (non-interactive friendly)

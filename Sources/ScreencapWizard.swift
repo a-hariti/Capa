@@ -161,6 +161,20 @@ struct ScreencapWizard {
       codec = (codecIdx == 0) ? .h264 : .hevc
     }
 
+    let cfrFPS: Int?
+    if let v = opts.cfrFPS {
+      cfrFPS = v
+    } else if opts.nonInteractive {
+      cfrFPS = nil
+    } else {
+      let idx = selectOption(
+        title: "Post-process to CFR 60fps?",
+        options: ["No", "Yes"],
+        defaultIndex: 0
+      )
+      cfrFPS = (idx == 1) ? 60 : nil
+    }
+
     let logicalWidth = Int(display.width)
     let logicalHeight = Int(display.height)
     let geometry = captureGeometry(filter: filter, fallbackLogicalSize: (logicalWidth, logicalHeight))
@@ -285,6 +299,22 @@ struct ScreencapWizard {
       )
     } catch {
       print("Warning: failed to post-process audio tracks: \(error)")
+    }
+
+    if let cfrFPS {
+      print("Post-processing video to CFR \(cfrFPS) fps...")
+      let ppTicker = ElapsedTicker(prefix: "⏳")
+      ppTicker.startIfTTY()
+      var cfrOK = false
+      do {
+        try await VideoCFR.rewriteInPlace(url: outFile, fps: cfrFPS)
+        cfrOK = true
+      } catch {
+        ppTicker.stop()
+        print("Warning: CFR post-process failed: \(error)")
+      }
+      ppTicker.stop()
+      if cfrOK { print("CFR done.") }
     }
 
     print("Saved.")
