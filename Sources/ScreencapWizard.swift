@@ -278,7 +278,24 @@ struct ScreencapWizard {
       return
     }
 
+    do {
+      try PostProcess.addMasterAudioTrackIfNeeded(
+        url: outFile,
+        includeSystemAudio: includeSystemAudio,
+        includeMicrophone: includeMic
+      )
+    } catch {
+      print("Warning: failed to post-process audio tracks: \(error)")
+    }
+
     print("Saved: \(outFile.path)")
+    if includeSystemAudio || includeMic {
+      var parts: [String] = []
+      parts.append("qaa=Master (mixed)")
+      if includeSystemAudio { parts.append("qab=System") }
+      if includeMic { parts.append("qac=Mic") }
+      print("Audio tracks (language tags): " + parts.joined(separator: ", "))
+    }
     let shouldOpen: Bool
     if let openWhenDone = opts.openWhenDone {
       shouldOpen = openWhenDone

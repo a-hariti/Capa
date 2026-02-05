@@ -371,6 +371,11 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     if options.includeSystemAudio {
       let aIn = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
       aIn.expectsMediaDataInRealTime = true
+      aIn.metadata = [trackTitle("System Audio")]
+      // Use distinct language tags so editors/players can differentiate tracks.
+      // qaa/qab/qac are reserved for local use (ISO 639-2).
+      aIn.languageCode = "qab"
+      aIn.extendedLanguageTag = "qab-x-capa-system"
       if writer.canAdd(aIn) {
         writer.add(aIn)
         systemAudioIn = aIn
@@ -380,6 +385,9 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     if options.includeMicrophone {
       let aIn = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
       aIn.expectsMediaDataInRealTime = true
+      aIn.metadata = [trackTitle("Microphone")]
+      aIn.languageCode = "qac"
+      aIn.extendedLanguageTag = "qac-x-capa-mic"
       if writer.canAdd(aIn) {
         writer.add(aIn)
         micAudioIn = aIn
@@ -426,5 +434,13 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     if writer.status == .failed {
       throw writer.error ?? NSError(domain: "ScreenRecorder", code: 41, userInfo: [NSLocalizedDescriptionKey: "Writer failed"])
     }
+  }
+
+  private func trackTitle(_ title: String) -> AVMetadataItem {
+    let item = AVMutableMetadataItem()
+    item.identifier = .quickTimeUserDataTrackName
+    item.value = title as NSString
+    item.dataType = kCMMetadataBaseDataType_UTF8 as String
+    return item
   }
 }
