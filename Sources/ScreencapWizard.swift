@@ -132,10 +132,7 @@ struct ScreencapWizard {
       includeMic = false
     } else if !audioDevices.isEmpty {
       let audioOptions = ["No microphone"] + audioDevices.map(microphoneLabel)
-      let title = includeSystemAudio
-        ? "Microphone (optional; can sound echoey if it picks up speakers)"
-        : "Microphone"
-      let audioIdx = selectOption(title: title, options: audioOptions, defaultIndex: 0)
+      let audioIdx = selectOption(title: "Microphone", options: audioOptions, defaultIndex: 0)
       if audioIdx > 0 {
         audioDevice = audioDevices[audioIdx - 1]
         includeMic = true
