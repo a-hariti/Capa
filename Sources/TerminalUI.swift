@@ -122,14 +122,23 @@ func promptYesNo(_ prompt: String, defaultYes: Bool) -> Bool {
 final class ElapsedTicker {
   private let fd: UnsafeMutablePointer<FILE>
   private let prefix: String
+  private let tickInterval: DispatchTimeInterval
+  private let suffix: (@Sendable () -> String)?
   private var timer: DispatchSourceTimer?
   private var startTime: DispatchTime?
-  private var lastPrintedLen: Int = 0
+  private var lastPrintedVisibleLen: Int = 0
   private var cursorHidden = false
 
-  init(prefix: String = "⏺︎", toStderr: Bool = true) {
+  init(
+    prefix: String = "⏺︎",
+    toStderr: Bool = true,
+    tickInterval: DispatchTimeInterval = .seconds(1),
+    suffix: (@Sendable () -> String)? = nil
+  ) {
     self.prefix = prefix
     self.fd = toStderr ? stderr : stdout
+    self.tickInterval = tickInterval
+    self.suffix = suffix
   }
 
   func startIfTTY() {
@@ -145,7 +154,7 @@ final class ElapsedTicker {
     hideCursor()
 
     let t = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
-    t.schedule(deadline: .now(), repeating: .seconds(1), leeway: .milliseconds(50))
+    t.schedule(deadline: .now(), repeating: tickInterval, leeway: .milliseconds(50))
     t.setEventHandler { [weak self] in self?.tick() }
     timer = t
     t.resume()
@@ -162,11 +171,18 @@ final class ElapsedTicker {
   private func tick() {
     guard let startTime else { return }
     let elapsed = max(0, Int((DispatchTime.now().uptimeNanoseconds - startTime.uptimeNanoseconds) / 1_000_000_000))
-    let s = "\(prefix) \(format(elapsedSeconds: elapsed))"
+    var s = "\(prefix) \(format(elapsedSeconds: elapsed))"
+    if let suffix {
+      let extra = suffix()
+      if !extra.isEmpty {
+        s += "  " + extra
+      }
+    }
 
     // Re-write the same line, padding any leftover characters.
-    let pad = max(0, lastPrintedLen - s.utf8.count)
-    lastPrintedLen = s.utf8.count
+    let visibleLen = Ansi.visibleWidth(s)
+    let pad = max(0, lastPrintedVisibleLen - visibleLen)
+    lastPrintedVisibleLen = visibleLen
     writeLine("\r" + s + String(repeating: " ", count: pad))
   }
 
@@ -189,13 +205,13 @@ final class ElapsedTicker {
     guard !cursorHidden else { return }
     cursorHidden = true
     // ANSI: hide cursor
-    writeLine("\u{001B}[?25l")
+    writeLine(Ansi.hideCursor)
   }
 
   private func showCursor() {
     guard cursorHidden else { return }
     cursorHidden = false
     // ANSI: show cursor
-    writeLine("\u{001B}[?25h")
+    writeLine(Ansi.showCursor)
   }
 }

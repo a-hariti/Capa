@@ -11,6 +11,11 @@ import VideoToolbox
 /// - Use `AVOutputSettingsAssistant` as the baseline encoder config, then remove bitrate caps
 ///   and request max quality to avoid chroma starvation (the typical "washed out" symptom).
 final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
+  enum AudioSource: Sendable {
+    case microphone
+    case system
+  }
+
   struct Options: Sendable {
     var outputURL: URL
     var videoCodec: AVVideoCodecType
@@ -20,6 +25,9 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
 
     var width: Int
     var height: Int
+
+    /// Called on the recorder's IO queue with a best-effort dBFS estimate.
+    var onAudioLevel: (@Sendable (AudioSource, Float) -> Void)?
   }
 
   private struct UnsafeSample: @unchecked Sendable {
@@ -223,6 +231,10 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     guard options.includeMicrophone else { return }
     guard CMSampleBufferDataIsReady(sample) else { return }
 
+    if let onAudioLevel = options.onAudioLevel, let db = AudioLevels.peakDBFS(from: sample) {
+      onAudioLevel(.microphone, db)
+    }
+
     enqueueAudio(sample: sample, into: &micQueue, readIndex: &micQueueReadIndex)
     drainAudioLocked()
   }
@@ -230,6 +242,10 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
   private func handleSystemAudioLocked(sample: CMSampleBuffer) {
     guard options.includeSystemAudio else { return }
     guard CMSampleBufferDataIsReady(sample) else { return }
+
+    if let onAudioLevel = options.onAudioLevel, let db = AudioLevels.peakDBFS(from: sample) {
+      onAudioLevel(.system, db)
+    }
 
     enqueueAudio(sample: sample, into: &systemQueue, readIndex: &systemQueueReadIndex)
     drainAudioLocked()

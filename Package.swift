@@ -18,7 +18,15 @@ let package = Package(
       dependencies: [
         .product(name: "ArgumentParser", package: "swift-argument-parser")
       ],
-      path: "Sources"
+      path: "Sources",
+      swiftSettings: [
+        .unsafeFlags(["-enable-testing"], .when(configuration: .debug))
+      ]
+    ),
+    .testTarget(
+      name: "CapaTests",
+      dependencies: ["capa"],
+      path: "Tests/CapaTests"
     )
   ]
 )

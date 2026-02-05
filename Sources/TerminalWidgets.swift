@@ -7,6 +7,31 @@ enum Ansi {
   static let showCursor = "\u{001B}[?25h"
 
   static func fg256(_ n: Int) -> String { "\u{001B}[38;5;\(n)m" }
+
+  static func visibleWidth(_ s: String) -> Int {
+    // Best-effort terminal "cell" width, ignoring ANSI escape sequences and common zero-width scalars.
+    var count = 0
+    var it = s.unicodeScalars.makeIterator()
+    while let sc = it.next() {
+      if sc.value == 0x1B { // ESC
+        // Skip CSI: ESC [ ... <final-byte>
+        if let next = it.next(), next.value == 0x5B { // '['
+          while let c = it.next() {
+            let v = c.value
+            if (v >= 0x40 && v <= 0x7E) { break } // final byte
+          }
+        }
+        continue
+      }
+
+      // Variation selectors / combining marks generally have zero width.
+      if sc.value == 0xFE0E || sc.value == 0xFE0F { continue }
+      if sc.properties.isGraphemeExtend { continue }
+
+      count += 1
+    }
+    return count
+  }
 }
 
 struct Bar {
@@ -96,3 +121,34 @@ final class ProgressBar: @unchecked Sendable {
   }
 }
 
+struct LoudnessMeter {
+  /// Map dBFS to a 0...1 fraction for bar fill.
+  static func fraction(db: Float) -> Double {
+    // Clamp to a range that makes sense for a visual meter.
+    let floor: Float = -60
+    let t = max(0, min(1, (db - floor) / (0 - floor)))
+    return Double(t)
+  }
+
+  static func color(db: Float) -> String {
+    // Rough levels for screen recording.
+    if db >= -12 { return Ansi.fg256(196) } // red
+    if db >= -24 { return Ansi.fg256(226) } // yellow
+    return Ansi.fg256(46) // green
+  }
+
+  static func render(label: String, db: Float?, width: Int = 12, style: Bar.Style = .smooth) -> String {
+    let reset = Ansi.reset
+    guard let db else {
+      let c = Ansi.fg256(245)
+      let bar = Bar.render(fraction: 0, width: width, style: style)
+      return "\(label) \(c)--dB \(c)[\(bar)]\(reset)"
+    }
+
+    let c = color(db: db)
+    let frac = fraction(db: db)
+    let bar = Bar.render(fraction: frac, width: width, style: style)
+    let dbStr = String(format: "%@%3.0fdB%@", c, db, reset)
+    return "\(label) \(dbStr) \(c)[\(bar)]\(reset)"
+  }
+}

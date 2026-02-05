@@ -30,12 +30,7 @@ struct CaptureGeometry {
   let pointPixelScale: Double
 }
 
-func captureGeometry(filter: SCContentFilter, fallbackLogicalSize: (Int, Int)) -> CaptureGeometry {
-  // On modern macOS, ScreenCaptureKit exposes the content rect in points and a point->pixel scale factor.
-  let rect = filter.contentRect
-  let scale = Double(filter.pointPixelScale)
-
-  // Defensive fallback if the filter returns zeros for some reason.
+func computeCaptureGeometry(rect: CGRect, scale: Double, fallbackLogicalSize: (Int, Int)) -> CaptureGeometry {
   if rect.width <= 0 || rect.height <= 0 || scale <= 0 {
     let (lw, lh) = fallbackLogicalSize
     return CaptureGeometry(
@@ -49,6 +44,13 @@ func captureGeometry(filter: SCContentFilter, fallbackLogicalSize: (Int, Int)) -
   let w = max(2, Int((rect.width * scale).rounded(.toNearestOrAwayFromZero)))
   let h = max(2, Int((rect.height * scale).rounded(.toNearestOrAwayFromZero)))
   return CaptureGeometry(sourceRect: rect, pixelWidth: w, pixelHeight: h, pointPixelScale: scale)
+}
+
+func captureGeometry(filter: SCContentFilter, fallbackLogicalSize: (Int, Int)) -> CaptureGeometry {
+  // On modern macOS, ScreenCaptureKit exposes the content rect in points and a point->pixel scale factor.
+  let rect = filter.contentRect
+  let scale = Double(filter.pointPixelScale)
+  return computeCaptureGeometry(rect: rect, scale: scale, fallbackLogicalSize: fallbackLogicalSize)
 }
 
 func microphoneLabel(_ device: AVCaptureDevice) -> String {

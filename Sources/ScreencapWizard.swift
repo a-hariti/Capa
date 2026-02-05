@@ -243,6 +243,16 @@ struct Capa: AsyncParsableCommand {
     } else {
       outFile = recsDir.appendingPathComponent("screen-\(ts).mov")
     }
+
+    let hasMic = includeMic
+    let hasSystemAudio = includeSystemAudio
+
+    let meters = LiveMeters()
+    let showMeters = Terminal.isTTY(fileno(stderr)) && (hasMic || hasSystemAudio)
+    var onAudioLevel: (@Sendable (ScreenRecorder.AudioSource, Float) -> Void)?
+    if showMeters {
+      onAudioLevel = { source, db in meters.update(source: source, db: db) }
+    }
     let recorderOptions = ScreenRecorder.Options(
       outputURL: outFile,
       videoCodec: codec,
@@ -250,7 +260,8 @@ struct Capa: AsyncParsableCommand {
       microphoneDeviceID: includeMic ? audioDevice?.uniqueID : nil,
       includeSystemAudio: includeSystemAudio,
       width: geometry.pixelWidth,
-      height: geometry.pixelHeight
+      height: geometry.pixelHeight,
+      onAudioLevel: onAudioLevel
     )
     let recorder = ScreenRecorder(filter: filter, options: recorderOptions)
 
@@ -306,7 +317,14 @@ struct Capa: AsyncParsableCommand {
       DispatchQueue.global().asyncAfter(deadline: .now() + .seconds(seconds)) { stopSignal.signal() }
     }
 
-    let ticker = ElapsedTicker()
+    var suffix: (@Sendable () -> String)?
+    if showMeters {
+      suffix = { meters.render(includeMicrophone: hasMic, includeSystemAudio: hasSystemAudio) }
+    }
+    let ticker = ElapsedTicker(
+      tickInterval: showMeters ? .milliseconds(100) : .seconds(1),
+      suffix: suffix
+    )
 
     do {
       try await recorder.start()
