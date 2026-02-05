@@ -42,8 +42,12 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
   private var micAudioIn: AVAssetWriterInput?
   private var systemAudioIn: AVAssetWriterInput?
 
-  private var pendingMic: [CMSampleBuffer] = []
-  private var pendingSystemAudio: [CMSampleBuffer] = []
+  // We must not drop audio samples just because the writer input has backpressure.
+  // Dropping can produce perceptual artifacts (metallic/echoey audio). Buffer and drain instead.
+  private var micQueue: [CMSampleBuffer] = []
+  private var micQueueReadIndex: Int = 0
+  private var systemQueue: [CMSampleBuffer] = []
+  private var systemQueueReadIndex: Int = 0
   private var isStopping = false
   private var lastPTS: CMTime = .zero
   private var sessionStartPTS: CMTime?
@@ -153,8 +157,10 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     self.videoAdaptor = nil
     self.micAudioIn = nil
     self.systemAudioIn = nil
-    self.pendingMic = []
-    self.pendingSystemAudio = []
+    self.micQueue = []
+    self.micQueueReadIndex = 0
+    self.systemQueue = []
+    self.systemQueueReadIndex = 0
     self.failure = nil
     self.isStopping = false
     self.lastPTS = .zero
@@ -218,6 +224,8 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
       }
 
       lastPTS = pts
+      // Drain buffered audio opportunistically to keep A/V tightly synchronized.
+      drainAudioLocked()
     } catch {
       failure = error
     }
@@ -227,35 +235,61 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     guard options.includeMicrophone else { return }
     guard CMSampleBufferDataIsReady(sample) else { return }
 
-    guard let writer, let micAudioIn, writer.status == .writing else {
-      pendingMic.append(sample)
-      return
-    }
-
-    if let sessionStartPTS, CMSampleBufferGetPresentationTimeStamp(sample) < sessionStartPTS {
-      return
-    }
-
-    if micAudioIn.isReadyForMoreMediaData {
-      _ = micAudioIn.append(sample)
-    }
+    enqueueAudio(sample: sample, into: &micQueue, readIndex: &micQueueReadIndex)
+    drainAudioLocked()
   }
 
   private func handleSystemAudioLocked(sample: CMSampleBuffer) {
     guard options.includeSystemAudio else { return }
     guard CMSampleBufferDataIsReady(sample) else { return }
 
-    guard let writer, let systemAudioIn, writer.status == .writing else {
-      pendingSystemAudio.append(sample)
-      return
+    enqueueAudio(sample: sample, into: &systemQueue, readIndex: &systemQueueReadIndex)
+    drainAudioLocked()
+  }
+
+  private func enqueueAudio(sample: CMSampleBuffer, into queue: inout [CMSampleBuffer], readIndex: inout Int) {
+    // Cap memory growth in pathological backpressure scenarios.
+    let maxQueued = 2000
+    queue.append(sample)
+    if queue.count > maxQueued {
+      let removeCount = queue.count - maxQueued
+      queue.removeFirst(removeCount)
+      readIndex = max(0, readIndex - removeCount)
+    }
+  }
+
+  private func drainAudioLocked() {
+    precondition(!Thread.isMainThread)
+    guard failure == nil else { return }
+    guard let writer, writer.status == .writing else { return }
+    guard let sessionStartPTS else { return }
+
+    func drain(queue: inout [CMSampleBuffer], readIndex: inout Int, input: AVAssetWriterInput) {
+      while readIndex < queue.count && input.isReadyForMoreMediaData {
+        let s = queue[readIndex]
+        readIndex += 1
+        if CMSampleBufferGetPresentationTimeStamp(s) < sessionStartPTS { continue }
+        if !input.append(s) {
+          failure = writer.error ?? NSError(domain: "ScreenRecorder", code: 21, userInfo: [NSLocalizedDescriptionKey: "Audio append failed (status: \(writer.status))"])
+          return
+        }
+      }
+
+      // Compact occasionally to keep the array small without O(n) per sample.
+      if readIndex > 256 {
+        queue.removeFirst(readIndex)
+        readIndex = 0
+      } else if readIndex == queue.count {
+        queue.removeAll(keepingCapacity: true)
+        readIndex = 0
+      }
     }
 
-    if let sessionStartPTS, CMSampleBufferGetPresentationTimeStamp(sample) < sessionStartPTS {
-      return
+    if let micAudioIn {
+      drain(queue: &micQueue, readIndex: &micQueueReadIndex, input: micAudioIn)
     }
-
-    if systemAudioIn.isReadyForMoreMediaData {
-      _ = systemAudioIn.append(sample)
+    if let systemAudioIn {
+      drain(queue: &systemQueue, readIndex: &systemQueueReadIndex, input: systemAudioIn)
     }
   }
 
@@ -365,28 +399,8 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     self.systemAudioIn = systemAudioIn
     self.sessionStartPTS = startPTS
 
-    // Flush any microphone samples that arrived before video started.
-    if let micAudioIn, writer.status == .writing {
-      let buffered = pendingMic
-      pendingMic.removeAll(keepingCapacity: true)
-      for s in buffered {
-        if CMSampleBufferGetPresentationTimeStamp(s) < startPTS { continue }
-        if micAudioIn.isReadyForMoreMediaData {
-          _ = micAudioIn.append(s)
-        }
-      }
-    }
-
-    if let systemAudioIn, writer.status == .writing {
-      let buffered = pendingSystemAudio
-      pendingSystemAudio.removeAll(keepingCapacity: true)
-      for s in buffered {
-        if CMSampleBufferGetPresentationTimeStamp(s) < startPTS { continue }
-        if systemAudioIn.isReadyForMoreMediaData {
-          _ = systemAudioIn.append(s)
-        }
-      }
-    }
+    // Flush any audio samples that arrived before video started.
+    drainAudioLocked()
   }
 
   private func finishLocked() throws {
