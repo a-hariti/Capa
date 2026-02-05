@@ -14,21 +14,20 @@ enum PostProcess {
     var wantsMaster: Bool
   }
 
-  static func planForAsset(_ asset: AVAsset, includeSystemAudio: Bool, includeMicrophone: Bool) -> AudioPlan {
+  static func planForTracks(_ tracks: [AVAssetTrack], includeSystemAudio: Bool, includeMicrophone: Bool) -> AudioPlan {
     // Our capture writer creates audio tracks in this order:
-    // 1) system audio (if enabled)
-    // 2) microphone (if enabled)
+    // 1) microphone (if enabled)
+    // 2) system audio (if enabled)
     //
     // When only one is enabled, there's only one audio track.
-    let tracks = asset.tracks(withMediaType: .audio)
     var sources: [(AVAssetTrack, String)] = []
     var i = 0
-    if includeSystemAudio, i < tracks.count {
-      sources.append((tracks[i], "System Audio"))
-      i += 1
-    }
     if includeMicrophone, i < tracks.count {
       sources.append((tracks[i], "Microphone"))
+      i += 1
+    }
+    if includeSystemAudio, i < tracks.count {
+      sources.append((tracks[i], "System Audio"))
       i += 1
     }
 
@@ -44,15 +43,16 @@ enum PostProcess {
     url: URL,
     includeSystemAudio: Bool,
     includeMicrophone: Bool
-  ) throws {
+  ) async throws {
     let asset = AVURLAsset(url: url)
-    let plan = planForAsset(asset, includeSystemAudio: includeSystemAudio, includeMicrophone: includeMicrophone)
+    let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+    let plan = planForTracks(audioTracks, includeSystemAudio: includeSystemAudio, includeMicrophone: includeMicrophone)
     guard plan.wantsMaster else { return }
 
     let tmpURL = url.deletingLastPathComponent()
       .appendingPathComponent(".capa-tmp-\(UUID().uuidString).mov")
 
-    try rewriteWithMasterAudio(asset: asset, plan: plan, outputURL: tmpURL)
+    try await rewriteWithMasterAudio(asset: asset, plan: plan, outputURL: tmpURL)
 
     // Atomic-ish replace on same volume.
     let fm = FileManager.default
@@ -62,8 +62,8 @@ enum PostProcess {
 
   // MARK: - Implementation
 
-  private static func rewriteWithMasterAudio(asset: AVAsset, plan: AudioPlan, outputURL: URL) throws {
-    guard let videoTrack = asset.tracks(withMediaType: .video).first else {
+  private static func rewriteWithMasterAudio(asset: AVAsset, plan: AudioPlan, outputURL: URL) async throws {
+    guard let videoTrack = try await asset.loadTracks(withMediaType: .video).first else {
       throw NSError(domain: "PostProcess", code: 1, userInfo: [NSLocalizedDescriptionKey: "Missing video track"])
     }
 
@@ -78,7 +78,8 @@ enum PostProcess {
     }
     reader.add(videoOut)
 
-    let videoHint = videoTrack.formatDescriptions.first.map { $0 as! CMFormatDescription }
+    let fds = try await videoTrack.load(.formatDescriptions)
+    let videoHint = fds.first
     let videoIn = AVAssetWriterInput(mediaType: .video, outputSettings: nil, sourceFormatHint: videoHint)
     videoIn.expectsMediaDataInRealTime = false
     guard writer.canAdd(videoIn) else {
@@ -153,8 +154,6 @@ enum PostProcess {
     // Drive writer readiness the idiomatic way (Apple docs): requestMediaDataWhenReady.
     // We coordinate all tracks from a single serial queue.
     let q = DispatchQueue(label: "capa.postprocess")
-    let videoDoneSema = DispatchSemaphore(value: 0)
-    let audioDoneSema = DispatchSemaphore(value: 0)
 
     final class Driver: @unchecked Sendable {
       struct Segment {
@@ -508,34 +507,64 @@ enum PostProcess {
       channels: channels
     )
 
-    videoIn.requestMediaDataWhenReady(on: q) {
-      driver.stepVideo()
-      if driver.videoDone, !driver.videoSignaled {
-        driver.videoSignaled = true
-        videoDoneSema.signal()
-      }
-    }
+    try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, any Error>) in
+      final class AwaitState: @unchecked Sendable {
+        let cont: CheckedContinuation<Void, any Error>
+        let driver: Driver
+        var remaining = 2
+        var finished = false
 
-    // Wake up the audio step when any audio input is ready.
-    let audioInputs = driver.sources.map(\.input) + [masterIn]
-    for input in audioInputs {
-      input.requestMediaDataWhenReady(on: q) {
-        driver.stepAudio()
-        if driver.audioDone, !driver.audioSignaled {
-          driver.audioSignaled = true
-          audioDoneSema.signal()
+        init(cont: CheckedContinuation<Void, any Error>, driver: Driver) {
+          self.cont = cont
+          self.driver = driver
+        }
+      }
+
+      let state = AwaitState(cont: cont, driver: driver)
+
+      let finish: @Sendable (Error?) -> Void = { error in
+        guard !state.finished else { return }
+        state.finished = true
+        if let error {
+          state.cont.resume(throwing: error)
+        } else {
+          state.cont.resume(returning: ())
+        }
+      }
+
+      let partDone: @Sendable () -> Void = {
+        state.remaining -= 1
+        if state.remaining <= 0 {
+          finish(state.driver.failure)
+        }
+      }
+
+      // All callbacks are executed on `q` by AVFoundation.
+      driver.videoIn.requestMediaDataWhenReady(on: q) {
+        driver.stepVideo()
+        if let err = driver.failure { finish(err); return }
+        if driver.videoDone, !driver.videoSignaled {
+          driver.videoSignaled = true
+          partDone()
+        }
+      }
+
+      let audioInputs = driver.sources.map(\.input) + [driver.masterIn]
+      for input in audioInputs {
+        input.requestMediaDataWhenReady(on: q) {
+          driver.stepAudio()
+          if let err = driver.failure { finish(err); return }
+          if driver.audioDone, !driver.audioSignaled {
+            driver.audioSignaled = true
+            partDone()
+          }
         }
       }
     }
 
-    videoDoneSema.wait()
-    audioDoneSema.wait()
-
-    if let err = driver.failure { throw err }
-
-    let sema = DispatchSemaphore(value: 0)
-    writer.finishWriting { sema.signal() }
-    sema.wait()
+    await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+      writer.finishWriting { cont.resume(returning: ()) }
+    }
 
     if writer.status == .failed {
       throw writer.error ?? NSError(domain: "PostProcess", code: 40, userInfo: [NSLocalizedDescriptionKey: "Writer failed"])

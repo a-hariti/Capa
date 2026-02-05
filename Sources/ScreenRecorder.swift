@@ -368,6 +368,18 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
       AVEncoderBitRateKey: 128_000,
     ]
 
+    if options.includeMicrophone {
+      let aIn = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
+      aIn.expectsMediaDataInRealTime = true
+      aIn.metadata = [trackTitle("Microphone")]
+      aIn.languageCode = "qac"
+      aIn.extendedLanguageTag = "qac-x-capa-mic"
+      if writer.canAdd(aIn) {
+        writer.add(aIn)
+        micAudioIn = aIn
+      }
+    }
+
     if options.includeSystemAudio {
       let aIn = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
       aIn.expectsMediaDataInRealTime = true
@@ -379,18 +391,6 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
       if writer.canAdd(aIn) {
         writer.add(aIn)
         systemAudioIn = aIn
-      }
-    }
-
-    if options.includeMicrophone {
-      let aIn = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
-      aIn.expectsMediaDataInRealTime = true
-      aIn.metadata = [trackTitle("Microphone")]
-      aIn.languageCode = "qac"
-      aIn.extendedLanguageTag = "qac-x-capa-mic"
-      if writer.canAdd(aIn) {
-        writer.add(aIn)
-        micAudioIn = aIn
       }
     }
 

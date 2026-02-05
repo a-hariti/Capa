@@ -278,7 +278,7 @@ struct ScreencapWizard {
     }
 
     do {
-      try PostProcess.addMasterAudioTrackIfNeeded(
+      try await PostProcess.addMasterAudioTrackIfNeeded(
         url: outFile,
         includeSystemAudio: includeSystemAudio,
         includeMicrophone: includeMic
@@ -291,8 +291,8 @@ struct ScreencapWizard {
     if includeSystemAudio || includeMic {
       var parts: [String] = []
       parts.append("qaa=Master (mixed)")
-      if includeSystemAudio { parts.append("qab=System") }
       if includeMic { parts.append("qac=Mic") }
+      if includeSystemAudio { parts.append("qab=System") }
       print("Audio tracks (language tags): " + parts.joined(separator: ", "))
     }
     let shouldOpen: Bool
