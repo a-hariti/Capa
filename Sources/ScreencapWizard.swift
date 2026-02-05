@@ -51,7 +51,7 @@ struct ScreencapWizard {
 
     let content: SCShareableContent
     do {
-      content = try loadShareableContentSync()
+      content = try await SCShareableContent.current
     } catch {
       print("Failed to load shareable content: \(error)")
       return
@@ -93,8 +93,10 @@ struct ScreencapWizard {
     ).devices
 
     let includeSystemAudio: Bool
-    if opts.nonInteractive {
-      includeSystemAudio = opts.includeSystemAudio
+    if opts.includeSystemAudio {
+      includeSystemAudio = true
+    } else if opts.nonInteractive {
+      includeSystemAudio = false
     } else {
       let idx = selectOption(
         title: "Record System Audio?",
@@ -324,26 +326,4 @@ struct ScreencapWizard {
       try? p.run()
     }
   }
-}
-
-private func loadShareableContentSync() throws -> SCShareableContent {
-  final class Box: @unchecked Sendable {
-    var content: SCShareableContent?
-    var error: Error?
-  }
-  let box = Box()
-  let sema = DispatchSemaphore(value: 0)
-
-  SCShareableContent.getWithCompletionHandler { content, error in
-    box.content = content
-    box.error = error
-    sema.signal()
-  }
-
-  sema.wait()
-  if let err = box.error { throw err }
-  guard let result = box.content else {
-    throw NSError(domain: "ScreencapWizard", code: 1, userInfo: [NSLocalizedDescriptionKey: "No SCShareableContent returned"])
-  }
-  return result
 }

@@ -63,6 +63,9 @@ final class Terminal {
 }
 
 func selectOption(title: String, options: [String], defaultIndex: Int) -> Int {
+  guard Terminal.isTTY(STDIN_FILENO) else {
+    return min(max(defaultIndex, 0), options.count - 1)
+  }
   var index = min(max(defaultIndex, 0), options.count - 1)
   let lines = options.count + 2
 
