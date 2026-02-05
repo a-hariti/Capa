@@ -70,12 +70,16 @@ func selectOption(title: String, options: [String], defaultIndex: Int) -> Int {
   let lines = options.count + 2
 
   func render() {
-    print("\(title):")
+    print(TUITheme.title("\(title):"))
     for i in 0..<options.count {
-      if i == index { print("  > \(options[i])") }
-      else { print("    \(options[i])") }
+      if i == index {
+        print("  \(TUITheme.accent(TUITheme.Glyph.pickerCaret, bold: true)) \(Ansi.bold)\(TUITheme.accent(options[i], bold: true))\(Ansi.reset)")
+      } else {
+        print("    \(TUITheme.muted(options[i]))")
+      }
     }
-    print("Use up/down and Enter")
+    let hint = "↑/↓ move\(TUITheme.Glyph.pickerHintSep)Enter select"
+    print(TUITheme.muted(hint))
   }
 
   Terminal.enableRawMode()
@@ -171,7 +175,8 @@ final class ElapsedTicker {
   private func tick() {
     guard let startTime else { return }
     let elapsed = max(0, Int((DispatchTime.now().uptimeNanoseconds - startTime.uptimeNanoseconds) / 1_000_000_000))
-    var s = "\(prefix) \(format(elapsedSeconds: elapsed))"
+    let timerText = TUITheme.title(format(elapsedSeconds: elapsed))
+    var s = "\(TUITheme.accent(prefix, bold: true)) \(timerText)"
     if let suffix {
       let extra = suffix()
       if !extra.isEmpty {

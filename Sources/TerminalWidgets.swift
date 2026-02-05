@@ -5,6 +5,8 @@ enum Ansi {
   static let reset = "\u{001B}[0m"
   static let hideCursor = "\u{001B}[?25l"
   static let showCursor = "\u{001B}[?25h"
+  static let bold = "\u{001B}[1m"
+  static let dim = "\u{001B}[2m"
 
   static func fg256(_ n: Int) -> String { "\u{001B}[38;5;\(n)m" }
   static func bg256(_ n: Int) -> String { "\u{001B}[48;5;\(n)m" }
@@ -32,6 +34,43 @@ enum Ansi {
       count += 1
     }
     return count
+  }
+}
+
+enum TUITheme {
+  enum Color {
+    static let title = 255
+    static let label = 252
+    static let muted = 244
+    static let accent = 39
+    static let progressFill = 255
+    static let track = 236
+    static let meterLow = 46
+    static let meterMid = 226
+    static let meterHot = 196
+    static let meterIdle = 245
+  }
+
+  enum Glyph {
+    static let pickerCaret = "▸"
+    static let pickerHintSep = " • "
+  }
+
+  static func title(_ s: String) -> String {
+    "\(Ansi.bold)\(Ansi.fg256(Color.title))\(s)\(Ansi.reset)"
+  }
+
+  static func label(_ s: String) -> String {
+    "\(Ansi.fg256(Color.label))\(s)\(Ansi.reset)"
+  }
+
+  static func muted(_ s: String) -> String {
+    "\(Ansi.dim)\(Ansi.fg256(Color.muted))\(s)\(Ansi.reset)"
+  }
+
+  static func accent(_ s: String, bold: Bool = false) -> String {
+    let b = bold ? Ansi.bold : ""
+    return "\(b)\(Ansi.fg256(Color.accent))\(s)\(Ansi.reset)"
   }
 }
 
@@ -101,11 +140,15 @@ final class ProgressBar: @unchecked Sendable {
     let frac = Double(clamped) / Double(total)
 
     // Track + fill colors. Use background on the partial cell to avoid "gaps" showing terminal background.
-    let track = 236
-    let fill = 255
-    let bar = Bar.renderColoredSmooth(fraction: frac, width: width, fillFG: fill, trackFG: track, trackBG: track)
+    let bar = Bar.renderColoredSmooth(
+      fraction: frac,
+      width: width,
+      fillFG: TUITheme.Color.progressFill,
+      trackFG: TUITheme.Color.track,
+      trackBG: TUITheme.Color.track
+    )
     let lead = prefix.isEmpty ? "" : "\(prefix) "
-    let s = "\(lead)\(bar)\(Ansi.reset) \(pct)%"
+    let s = "\(lead)\(bar)\(Ansi.reset) \(TUITheme.label("\(pct)%"))"
 
     let visibleLen = Ansi.visibleWidth(s)
     let pad = max(0, lastVisibleLen - visibleLen)
@@ -140,23 +183,29 @@ struct LoudnessMeter {
 
   static func color(db: Float) -> String {
     // Rough levels for screen recording.
-    if db >= -12 { return Ansi.fg256(196) } // red
-    if db >= -24 { return Ansi.fg256(226) } // yellow
-    return Ansi.fg256(46) // green
+    if db >= -12 { return Ansi.fg256(TUITheme.Color.meterHot) } // red
+    if db >= -24 { return Ansi.fg256(TUITheme.Color.meterMid) } // yellow
+    return Ansi.fg256(TUITheme.Color.meterLow) // green
   }
 
   static func render(label: String, db: Float?, width: Int = 12, style: Bar.Style = .smooth) -> String {
     let reset = Ansi.reset
     guard let db else {
-      let c = Ansi.fg256(245)
+      let c = Ansi.fg256(TUITheme.Color.meterIdle)
       let bar: String
       switch style {
       case .smooth:
-        bar = Bar.renderColoredSmooth(fraction: 0, width: width, fillFG: 245, trackFG: 236, trackBG: 236)
+        bar = Bar.renderColoredSmooth(
+          fraction: 0,
+          width: width,
+          fillFG: TUITheme.Color.meterIdle,
+          trackFG: TUITheme.Color.track,
+          trackBG: TUITheme.Color.track
+        )
       case .steps:
         bar = c + Bar.render(fraction: 0, width: width, style: .steps)
       }
-      return "\(label) \(c)--dB \(bar)\(reset)"
+      return "\(TUITheme.label(label)) \(c)--dB \(bar)\(reset)"
     }
 
     let c = color(db: db)
@@ -168,13 +217,19 @@ struct LoudnessMeter {
       // For meters, use the db-driven color as the fill, and a fixed dark track.
       // The color escape in `c` is a foreground; extract the 256 code where possible is not worth it.
       // Just use green/yellow/red as 46/226/196.
-      let fillFG: Int = (db >= -12) ? 196 : (db >= -24) ? 226 : 46
-      bar = Bar.renderColoredSmooth(fraction: frac, width: width, fillFG: fillFG, trackFG: 236, trackBG: 236)
+      let fillFG: Int = (db >= -12) ? TUITheme.Color.meterHot : (db >= -24) ? TUITheme.Color.meterMid : TUITheme.Color.meterLow
+      bar = Bar.renderColoredSmooth(
+        fraction: frac,
+        width: width,
+        fillFG: fillFG,
+        trackFG: TUITheme.Color.track,
+        trackBG: TUITheme.Color.track
+      )
     case .steps:
       bar = c + Bar.render(fraction: frac, width: width, style: .steps)
     }
 
-    return "\(label) \(dbStr) \(bar)\(reset)"
+    return "\(TUITheme.label(label)) \(dbStr) \(bar)\(reset)"
   }
 }
 
