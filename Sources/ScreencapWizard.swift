@@ -187,19 +187,26 @@ struct ScreencapWizard {
       print("  Microphone: none")
     }
     print("Output file: \(outFile.path)")
-    print("Recording... press 'q' to stop.")
+    let canReadKeys = Terminal.isTTY(STDIN_FILENO)
+    if canReadKeys {
+      print("Recording... press 'q' to stop.")
+    } else {
+      print("Recording...")
+    }
 
     let stopSignal = DispatchSemaphore(value: 0)
 
     // Key listener.
-    DispatchQueue.global().async {
-      Terminal.enableRawMode()
-      defer { Terminal.disableRawMode() }
-      while true {
-        let key = Terminal.readKey()
-        if case .char(let c) = key, c == "q" || c == "Q" {
-          stopSignal.signal()
-          return
+    if canReadKeys {
+      DispatchQueue.global().async {
+        Terminal.enableRawMode()
+        defer { Terminal.disableRawMode() }
+        while true {
+          let key = Terminal.readKey()
+          if case .char(let c) = key, c == "q" || c == "Q" {
+            stopSignal.signal()
+            return
+          }
         }
       }
     }
@@ -217,9 +224,13 @@ struct ScreencapWizard {
       DispatchQueue.global().asyncAfter(deadline: .now() + .seconds(seconds)) { stopSignal.signal() }
     }
 
+    let ticker = ElapsedTicker()
+
     do {
       try await recorder.start()
+      ticker.startIfTTY()
     } catch {
+      ticker.stop()
       print("Failed to start capture: \(error)")
       return
     }
@@ -232,8 +243,10 @@ struct ScreencapWizard {
     }
 
     do {
+      ticker.stop()
       try await recorder.stop()
     } catch {
+      ticker.stop()
       print("Recording failed: \(error)")
       return
     }

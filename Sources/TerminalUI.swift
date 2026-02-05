@@ -13,6 +13,10 @@ final class Terminal {
   nonisolated(unsafe) private static var original = termios()
   nonisolated(unsafe) private static var rawEnabled = false
 
+  static func isTTY(_ fd: Int32) -> Bool {
+    isatty(fd) != 0
+  }
+
   static func enableRawMode() {
     guard !rawEnabled else { return }
     var raw = termios()
@@ -110,4 +114,68 @@ func promptYesNo(_ prompt: String, defaultYes: Bool) -> Bool {
     return c == "y" || c == "yes"
   }
   return defaultYes
+}
+
+final class ElapsedTicker {
+  private let fd: UnsafeMutablePointer<FILE>
+  private let prefix: String
+  private var timer: DispatchSourceTimer?
+  private var startTime: DispatchTime?
+  private var lastPrintedLen: Int = 0
+
+  init(prefix: String = "🔴", toStderr: Bool = true) {
+    self.prefix = prefix
+    self.fd = toStderr ? stderr : stdout
+  }
+
+  func startIfTTY() {
+    // Only render the live-updating line when attached to a terminal.
+    let isTTY = Terminal.isTTY(fileno(fd))
+    guard isTTY else { return }
+    start()
+  }
+
+  func start() {
+    guard timer == nil else { return }
+    startTime = .now()
+
+    let t = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+    t.schedule(deadline: .now(), repeating: .seconds(1), leeway: .milliseconds(50))
+    t.setEventHandler { [weak self] in self?.tick() }
+    timer = t
+    t.resume()
+  }
+
+  func stop() {
+    guard let t = timer else { return }
+    timer = nil
+    t.cancel()
+    writeLine("\n")
+  }
+
+  private func tick() {
+    guard let startTime else { return }
+    let elapsed = max(0, Int((DispatchTime.now().uptimeNanoseconds - startTime.uptimeNanoseconds) / 1_000_000_000))
+    let s = "\(prefix) \(format(elapsedSeconds: elapsed))"
+
+    // Re-write the same line, padding any leftover characters.
+    let pad = max(0, lastPrintedLen - s.utf8.count)
+    lastPrintedLen = s.utf8.count
+    writeLine("\r" + s + String(repeating: " ", count: pad))
+  }
+
+  private func format(elapsedSeconds: Int) -> String {
+    let h = elapsedSeconds / 3600
+    let m = (elapsedSeconds % 3600) / 60
+    let s = elapsedSeconds % 60
+    if h > 0 { return String(format: "%d:%02d:%02d", h, m, s) }
+    return String(format: "%02d:%02d", m, s)
+  }
+
+  private func writeLine(_ s: String) {
+    s.withCString { cstr in
+      fputs(cstr, fd)
+      fflush(fd)
+    }
+  }
 }
