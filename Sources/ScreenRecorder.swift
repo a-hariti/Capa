@@ -72,13 +72,6 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
   func stop() async throws {
     guard let stream else { return }
 
-    await withCheckedContinuation { cont in
-      ioQueue.async {
-        self.isStopping = true
-        cont.resume()
-      }
-    }
-
     do {
       try await stream.stopCapture()
     } catch {
@@ -88,6 +81,8 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     try await withCheckedThrowingContinuation { cont in
       ioQueue.async {
         do {
+          // After capture is stopped, prevent any late enqueued samples from being processed.
+          self.isStopping = true
           try self.finishLocked()
           cont.resume(returning: ())
         } catch {

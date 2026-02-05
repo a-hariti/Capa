@@ -35,11 +35,8 @@ func captureGeometry(filter: SCContentFilter, fallbackLogicalSize: (Int, Int)) -
   let rect = filter.contentRect
   let scale = Double(filter.pointPixelScale)
 
-  let w = max(2, Int((rect.width * scale).rounded(.toNearestOrAwayFromZero)))
-  let h = max(2, Int((rect.height * scale).rounded(.toNearestOrAwayFromZero)))
-
   // Defensive fallback if the filter returns zeros for some reason.
-  if w <= 0 || h <= 0 {
+  if rect.width <= 0 || rect.height <= 0 || scale <= 0 {
     let (lw, lh) = fallbackLogicalSize
     return CaptureGeometry(
       sourceRect: CGRect(x: 0, y: 0, width: CGFloat(lw), height: CGFloat(lh)),
@@ -49,6 +46,8 @@ func captureGeometry(filter: SCContentFilter, fallbackLogicalSize: (Int, Int)) -
     )
   }
 
+  let w = max(2, Int((rect.width * scale).rounded(.toNearestOrAwayFromZero)))
+  let h = max(2, Int((rect.height * scale).rounded(.toNearestOrAwayFromZero)))
   return CaptureGeometry(sourceRect: rect, pixelWidth: w, pixelHeight: h, pointPixelScale: scale)
 }
 
@@ -64,4 +63,3 @@ func microphoneLabel(_ device: AVCaptureDevice) -> String {
   }
   return device.localizedName
 }
-
