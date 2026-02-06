@@ -1,6 +1,28 @@
 import Foundation
 import Darwin
 
+private let wizardSummaryLabels = [
+  "Project Name",
+  "Display",
+  "Audio",
+  "Microphone",
+  "Camera",
+  "Video Codec",
+]
+
+private let wizardSummaryLabelWidth = wizardSummaryLabels
+  .map { Ansi.visibleWidth($0) }
+  .max() ?? 0
+
+func renderWizardSummary(label: String, value: String, isTTY: Bool) -> String {
+  let pad = max(0, wizardSummaryLabelWidth - Ansi.visibleWidth(label))
+  let paddedLabel = label + String(repeating: " ", count: pad)
+  if isTTY {
+    return "\(TUITheme.primary(paddedLabel)) \(TUITheme.label(":")) \(TUITheme.option(value))"
+  }
+  return "\(paddedLabel) : \(value)"
+}
+
 func fitTickerLine(base: String, suffix: String?, maxColumns: Int?) -> String {
   guard let suffix, !suffix.isEmpty else { return base }
   let withSuffix = "\(base)  \(suffix)"
@@ -201,7 +223,7 @@ func selectOptionWithBack(title: String, options: [String], defaultIndex: Int, a
       }
       print("\u{001B}[\(lines - 1)A", terminator: "")
       let picked = splitPrimarySecondary(options[index]).primary
-      print("\(TUITheme.primary("\(title):")) \(TUITheme.option(picked))")
+      print(renderWizardSummary(label: title, value: picked, isTTY: true))
       return .selected(index)
     case .escape:
       guard allowBack else { break }
@@ -245,7 +267,7 @@ func promptEditableDefault(title: String, defaultValue: String) -> TextInputResu
   var untouched = true
 
   func render() {
-    let line = "\(TUITheme.primary("\(title):")) \(TUITheme.label(value))"
+    let line = renderWizardSummary(label: title, value: value, isTTY: true)
     print("\r\u{001B}[2K\(line)", terminator: "")
     fflush(stdout)
   }

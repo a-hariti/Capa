@@ -535,8 +535,7 @@ struct Capa: AsyncParsableCommand {
               filter: filter,
               fallbackLogicalSize: (Int(d.width), Int(d.height))
             )
-            let displayTitle = isTTYOut ? TUITheme.primary("Display:") : "Display:"
-            print("\(displayTitle) \(optionText("\(geometry.pixelWidth)x\(geometry.pixelHeight)px"))")
+            print(renderWizardSummary(label: "Display", value: "\(geometry.pixelWidth)x\(geometry.pixelHeight)px", isTTY: isTTYOut))
             singleDisplayLinePrinted = true
           }
           stepCursor += 1
