@@ -4,6 +4,55 @@ import Foundation
 @preconcurrency import ScreenCaptureKit
 import Darwin
 
+enum OnOffMode: String, ExpressibleByArgument, Sendable {
+  case on
+  case off
+
+  var enabled: Bool { self == .on }
+}
+
+struct AudioRouting: Equatable, Sendable {
+  var includeMicrophone: Bool
+  var includeSystemAudio: Bool
+
+  static let none = AudioRouting(includeMicrophone: false, includeSystemAudio: false)
+  static let mic = AudioRouting(includeMicrophone: true, includeSystemAudio: false)
+  static let system = AudioRouting(includeMicrophone: false, includeSystemAudio: true)
+  static let micAndSystem = AudioRouting(includeMicrophone: true, includeSystemAudio: true)
+
+  static func parse(_ raw: String) throws -> AudioRouting {
+    let normalized = raw.lowercased().replacingOccurrences(of: " ", with: "")
+    if normalized.isEmpty {
+      throw ValidationError("Invalid --audio value: empty")
+    }
+    if normalized == "none" {
+      return .none
+    }
+
+    var includeMicrophone = false
+    var includeSystemAudio = false
+    var sawToken = false
+
+    for tokenSub in normalized.split(separator: "+", omittingEmptySubsequences: true) {
+      let token = String(tokenSub)
+      sawToken = true
+      switch token {
+      case "mic", "microphone":
+        includeMicrophone = true
+      case "sys", "system":
+        includeSystemAudio = true
+      default:
+        throw ValidationError("Invalid --audio token '\(token)'. Use only: none, mic, system, mic+system")
+      }
+    }
+
+    if !sawToken {
+      throw ValidationError("Invalid --audio value: '\(raw)'")
+    }
+    return AudioRouting(includeMicrophone: includeMicrophone, includeSystemAudio: includeSystemAudio)
+  }
+}
+
 @main
 struct Capa: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
@@ -22,9 +71,6 @@ struct Capa: AsyncParsableCommand {
   @Option(name: .customLong("display-index"), help: "Select display by index (from --list-displays)")
   var displayIndex: Int?
 
-  @Flag(name: .customLong("no-mic"), help: "Disable microphone")
-  var noMicrophone = false
-
   @Option(name: .customLong("mic-index"), help: "Select microphone by index (from --list-mics)")
   var microphoneIndex: Int?
 
@@ -40,8 +86,11 @@ struct Capa: AsyncParsableCommand {
   @Option(name: .customLong("camera-id"), help: "Select camera by AVCaptureDevice.uniqueID")
   var cameraID: String?
 
-  @Flag(name: .customLong("system-audio"), help: "Capture system audio to a separate track")
-  var systemAudioFlag = false
+  @Option(name: .customLong("audio"), help: "Audio sources: (none, mic, system, mic+system)")
+  var audioSpec: String?
+
+  @Option(name: .customLong("safe-mix"), help: "Safe master limiter: on|off")
+  var safeMixMode: OnOffMode = .on
 
   @Flag(name: .customLong("vfr"), help: "Keep variable frame rate (skip CFR post-process)")
   var keepVFR = false
@@ -91,6 +140,12 @@ struct Capa: AsyncParsableCommand {
     }
     if let projectName, projectName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
       throw ValidationError("--project-name must not be empty")
+    }
+    if let audioSpec {
+      let parsed = try AudioRouting.parse(audioSpec)
+      if !parsed.includeMicrophone, (microphoneIndex != nil || microphoneID != nil) {
+        throw ValidationError("--audio \(audioSpec) does not include microphone; remove --mic-index/--mic-id or include mic")
+      }
     }
   }
 
@@ -212,7 +267,7 @@ struct Capa: AsyncParsableCommand {
     enum WizardStep {
       case projectName
       case display
-      case systemAudio
+      case audio
       case microphone
       case camera
       case codec
@@ -228,7 +283,7 @@ struct Capa: AsyncParsableCommand {
 
     var selectedDisplayIndex: Int?
     var selectedProjectName = projectName?.trimmingCharacters(in: .whitespacesAndNewlines)
-    var includeSystemAudio: Bool?
+    var audioRouting: AudioRouting?
     var audioDevice: AVCaptureDevice?
     var includeMic = false
     var cameraDevice: AVCaptureDevice?
@@ -236,7 +291,7 @@ struct Capa: AsyncParsableCommand {
     var codec: AVVideoCodecType?
 
     var displayDefaultIndex = 0
-    var systemAudioDefaultIndex = 0
+    var audioDefaultIndex = 1
     var microphoneDefaultIndex = 0
     var cameraDefaultIndex = 0
     var codecDefaultIndex = 0
@@ -256,11 +311,17 @@ struct Capa: AsyncParsableCommand {
       return
     }
 
-    if systemAudioFlag || nonInteractive {
-      includeSystemAudio = systemAudioFlag
+    if let audioSpec {
+      audioRouting = try AudioRouting.parse(audioSpec)
+    } else if nonInteractive {
+      audioRouting = AudioRouting.none
     }
 
-    if noMicrophone {
+    if let routing = audioRouting {
+      includeMic = routing.includeMicrophone
+    }
+
+    if !includeMic {
       includeMic = false
       audioDevice = nil
     } else if let idx = microphoneIndex {
@@ -276,6 +337,13 @@ struct Capa: AsyncParsableCommand {
         return
       }
       audioDevice = d
+      includeMic = true
+    } else if audioRouting?.includeMicrophone == true {
+      guard !audioDevices.isEmpty else {
+        print("Error: --audio requires a microphone but none were found")
+        return
+      }
+      audioDevice = audioDevices.first
       includeMic = true
     } else if nonInteractive || audioDevices.isEmpty {
       includeMic = false
@@ -315,8 +383,8 @@ struct Capa: AsyncParsableCommand {
       steps.append(.projectName)
     }
     if !nonInteractive { steps.append(.display) }
-    if includeSystemAudio == nil { steps.append(.systemAudio) }
-    if !noMicrophone && microphoneIndex == nil && microphoneID == nil && !nonInteractive && !audioDevices.isEmpty {
+    if audioRouting == nil { steps.append(.audio) }
+    if microphoneIndex == nil && microphoneID == nil && !nonInteractive && !audioDevices.isEmpty {
       steps.append(.microphone)
     }
     if !cameraFlag && cameraIndex == nil && cameraID == nil && !nonInteractive && !videoDevices.isEmpty {
@@ -402,17 +470,28 @@ struct Capa: AsyncParsableCommand {
           }
         }
 
-      case .systemAudio:
+      case .audio:
         let result = selectOptionWithBack(
-          title: "Record System Audio?",
-          options: ["Yes", "No"],
-          defaultIndex: systemAudioDefaultIndex,
+          title: "Audio",
+          options: ["Mic", "System", "Mic + System", "None"],
+          defaultIndex: audioDefaultIndex,
           allowBack: allowBack
         )
         switch result {
         case .selected(let idx):
-          systemAudioDefaultIndex = idx
-          includeSystemAudio = (idx == 0)
+          audioDefaultIndex = idx
+          switch idx {
+          case 0: audioRouting = .mic
+          case 1: audioRouting = .system
+          case 2: audioRouting = .micAndSystem
+          default: audioRouting = AudioRouting.none
+          }
+          includeMic = audioRouting?.includeMicrophone == true
+          if !includeMic {
+            audioDevice = nil
+          } else if audioDevice == nil, !audioDevices.isEmpty {
+            audioDevice = audioDevices[min(microphoneDefaultIndex, max(0, audioDevices.count - 1))]
+          }
           stepCursor += 1
         case .back:
           if let backIdx = previousRewindableStepIndex(from: stepCursor) {
@@ -424,23 +503,29 @@ struct Capa: AsyncParsableCommand {
         }
 
       case .microphone:
-        let options = ["No microphone"] + audioDevices.map(microphoneLabel)
+        guard includeMic else {
+          stepCursor += 1
+          continue
+        }
+        guard !audioDevices.isEmpty else {
+          print("No microphones found. Continuing without microphone.")
+          includeMic = false
+          audioDevice = nil
+          stepCursor += 1
+          continue
+        }
+        let options = audioDevices.map(microphoneLabel)
         let result = selectOptionWithBack(
           title: "Microphone",
           options: options,
-          defaultIndex: microphoneDefaultIndex,
+          defaultIndex: min(microphoneDefaultIndex, max(0, options.count - 1)),
           allowBack: allowBack
         )
         switch result {
         case .selected(let idx):
           microphoneDefaultIndex = idx
-          if idx > 0 {
-            includeMic = true
-            audioDevice = audioDevices[idx - 1]
-          } else {
-            includeMic = false
-            audioDevice = nil
-          }
+          includeMic = true
+          audioDevice = audioDevices[idx]
           stepCursor += 1
         case .back:
           if let backIdx = previousRewindableStepIndex(from: stepCursor) {
@@ -514,8 +599,8 @@ struct Capa: AsyncParsableCommand {
       print("Error: missing project name.")
       return
     }
-    guard let includeSystemAudio else {
-      print("Error: missing system audio selection.")
+    guard let audioRouting else {
+      print("Error: missing audio selection.")
       return
     }
     guard let codec else {
@@ -671,20 +756,20 @@ struct Capa: AsyncParsableCommand {
     }
 
     let hasMic = includeMic
-    let hasSystemAudio = includeSystemAudio
+    let hasSystemAudio = audioRouting.includeSystemAudio
 
     let meters = LiveMeters()
     let showMeters = Terminal.isTTY(fileno(stderr)) && (hasMic || hasSystemAudio)
-    var onAudioLevel: (@Sendable (ScreenRecorder.AudioSource, Float) -> Void)?
+    var onAudioLevel: (@Sendable (ScreenRecorder.AudioSource, AudioPeak) -> Void)?
     if showMeters {
-      onAudioLevel = { source, db in meters.update(source: source, db: db) }
+      onAudioLevel = { source, peak in meters.update(source: source, peak: peak) }
     }
     let recorderOptions = ScreenRecorder.Options(
       outputURL: outFile,
       videoCodec: codec,
       includeMicrophone: includeMic,
       microphoneDeviceID: includeMic ? audioDevice?.uniqueID : nil,
-      includeSystemAudio: includeSystemAudio,
+      includeSystemAudio: audioRouting.includeSystemAudio,
       width: geometry.pixelWidth,
       height: geometry.pixelHeight,
       includeCamera: includeCamera,
@@ -719,7 +804,7 @@ struct Capa: AsyncParsableCommand {
       } else {
         print(muted("  Camera: none"))
       }
-      print(muted("  System audio: \(includeSystemAudio ? "on" : "off")"))
+      print(muted("  System audio: \(audioRouting.includeSystemAudio ? "on" : "off")"))
       print("")
     }
     let canReadKeys = Terminal.isTTY(STDIN_FILENO)
@@ -797,11 +882,18 @@ struct Capa: AsyncParsableCommand {
     }
 
     do {
+      let mixConfig = PostProcess.MixConfig(
+        microphoneGainDB: 0,
+        systemGainDB: 0,
+        safeMixLimiter: safeMixMode.enabled
+      )
       try await PostProcess.addMasterAudioTrackIfNeeded(
         url: outFile,
-        includeSystemAudio: includeSystemAudio,
+        includeSystemAudio: audioRouting.includeSystemAudio,
         includeMicrophone: includeMic,
-        forceMaster: includeCamera
+        forceMaster: includeCamera,
+        mixConfig: mixConfig,
+        masterTrackPosition: .first
       )
     } catch {
       print("Warning: failed to post-process audio tracks: \(error)")
@@ -837,12 +929,12 @@ struct Capa: AsyncParsableCommand {
       print("\(savedLabel) \(abbreviateHomePath(outFile.path))")
     }
 
-    if verbose, includeSystemAudio || includeMic {
-      let screenHasMaster = (includeSystemAudio || includeMic) && (includeCamera || (includeSystemAudio && includeMic))
+    if verbose, audioRouting.includeSystemAudio || includeMic {
+      let screenHasMaster = (audioRouting.includeSystemAudio || includeMic) && (includeCamera || (audioRouting.includeSystemAudio && includeMic))
       var parts: [String] = []
       if screenHasMaster { parts.append("qaa=Master (mixed)") }
       if includeMic { parts.append("qac=Mic") }
-      if includeSystemAudio { parts.append("qab=System") }
+      if audioRouting.includeSystemAudio { parts.append("qab=System") }
       print(muted("  Audio tracks (language tags): " + parts.joined(separator: ", ")))
     }
     if verbose, includeCamera, cameraOutFile != nil {

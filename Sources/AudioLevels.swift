@@ -1,10 +1,20 @@
 import AudioToolbox
 import CoreMedia
 
+struct AudioPeak: Sendable, Equatable {
+  var db: Float
+  var clipped: Bool
+}
+
 enum AudioLevels {
   /// Computes a peak level in dBFS (0 dBFS is full-scale).
   /// Returns `nil` if the sample buffer doesn't contain readable PCM.
   static func peakDBFS(from sampleBuffer: CMSampleBuffer) -> Float? {
+    peak(from: sampleBuffer)?.db
+  }
+
+  /// Computes peak level and a best-effort clip indicator from PCM samples.
+  static func peak(from sampleBuffer: CMSampleBuffer) -> AudioPeak? {
     guard CMSampleBufferDataIsReady(sampleBuffer) else { return nil }
     guard let fmt = CMSampleBufferGetFormatDescription(sampleBuffer) else { return nil }
     guard let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fmt)?.pointee else { return nil }
@@ -86,6 +96,8 @@ enum AudioLevels {
       }
     }
 
-    return 20.0 * log10(max(eps, peak))
+    let db = 20.0 * log10(max(eps, peak))
+    let clipped = peak >= 0.999
+    return AudioPeak(db: db, clipped: clipped)
   }
 }

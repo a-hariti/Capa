@@ -28,6 +28,8 @@ final class MultiTrackPreservationTests: XCTestCase {
       let audios = try await asset.loadTracks(withMediaType: .audio)
       XCTAssertEqual(videos.count, 2)
       XCTAssertEqual(audios.count, 3) // mic + system + master
+      let firstTag = try await audios[0].load(.extendedLanguageTag)
+      XCTAssertEqual(firstTag, "qaa-x-capa-master")
     }
 
     // CFR rewrite must also preserve multiple video tracks (and all audio tracks).
@@ -39,6 +41,31 @@ final class MultiTrackPreservationTests: XCTestCase {
       XCTAssertEqual(videos.count, 2)
       XCTAssertEqual(audios.count, 3)
     }
+  }
+
+  func testCanPlaceMasterLastForSidecarOutputs() async throws {
+    let tempDir = try makeTempDir()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let url = tempDir.appendingPathComponent("multi-last.mov")
+    try writeMultiTrackMovie(url: url)
+
+    try await PostProcess.addMasterAudioTrackIfNeeded(
+      url: url,
+      includeSystemAudio: true,
+      includeMicrophone: true,
+      masterTrackPosition: .last
+    )
+
+    let asset = AVURLAsset(url: url)
+    let audios = try await asset.loadTracks(withMediaType: .audio)
+    XCTAssertEqual(audios.count, 3)
+    let tag0 = try await audios[0].load(.extendedLanguageTag)
+    let tag1 = try await audios[1].load(.extendedLanguageTag)
+    let tag2 = try await audios[2].load(.extendedLanguageTag)
+    XCTAssertEqual(tag0, "qac-x-capa-mic")
+    XCTAssertEqual(tag1, "qab-x-capa-system")
+    XCTAssertEqual(tag2, "qaa-x-capa-master")
   }
 }
 

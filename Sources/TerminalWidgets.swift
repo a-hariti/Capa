@@ -202,7 +202,7 @@ struct LoudnessMeter {
     return Ansi.fg256(TUITheme.Color.meterLow) // green
   }
 
-  static func render(label: String, db: Float?, width: Int = 12, style: Bar.Style = .smooth) -> String {
+  static func render(label: String, db: Float?, holdDB: Float? = nil, clipped: Bool = false, width: Int = 12, style: Bar.Style = .smooth) -> String {
     let reset = Ansi.reset
     guard let db else {
       let c = Ansi.fg256(TUITheme.Color.meterIdle)
@@ -224,7 +224,8 @@ struct LoudnessMeter {
 
     let c = color(db: db)
     let frac = fraction(db: db)
-    let dbStr = String(format: "%@%3.0fdB%@", c, db, reset)
+    let clipMark = clipped ? (Ansi.fg256(TUITheme.Color.meterHot) + "!" + reset) : " "
+    let dbStr = String(format: "%@%3.0fdB%@%@", c, db, reset, clipMark)
     let bar: String
     switch style {
     case .smooth:
@@ -232,12 +233,15 @@ struct LoudnessMeter {
       // The color escape in `c` is a foreground; extract the 256 code where possible is not worth it.
       // Just use green/yellow/red as 46/226/196.
       let fillFG: Int = (db >= -12) ? TUITheme.Color.meterHot : (db >= -24) ? TUITheme.Color.meterMid : TUITheme.Color.meterLow
-      bar = Bar.renderColoredSmooth(
+      let holdFrac = holdDB.map { fraction(db: $0) }
+      bar = Bar.renderMeterSmooth(
         fraction: frac,
+        holdFraction: holdFrac,
         width: width,
         fillFG: fillFG,
         trackFG: TUITheme.Color.track,
-        trackBG: TUITheme.Color.track
+        trackBG: TUITheme.Color.track,
+        holdFG: TUITheme.Color.label
       )
     case .steps:
       bar = c + Bar.render(fraction: frac, width: width, style: .steps)
@@ -248,6 +252,48 @@ struct LoudnessMeter {
 }
 
 extension Bar {
+  static func renderMeterSmooth(
+    fraction: Double,
+    holdFraction: Double?,
+    width: Int,
+    fillFG: Int,
+    trackFG: Int,
+    trackBG: Int,
+    holdFG: Int
+  ) -> String {
+    let w = max(1, width)
+    let t = max(0.0, min(1.0, fraction))
+    let units = Int((Double(w) * 8.0 * t).rounded(.toNearestOrAwayFromZero))
+    let full = min(w, units / 8)
+    let rem = units % 8
+    let hasPartial = rem > 0 && full < w
+    let partial = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"]
+
+    let holdPos: Int? = holdFraction.map { hf in
+      let c = max(0.0, min(1.0, hf))
+      return min(w - 1, max(0, Int(floor(c * Double(w)))))
+    }
+
+    var s = Ansi.bg256(trackBG)
+    for i in 0..<w {
+      var fg = trackFG
+      var glyph = "█"
+      if i < full {
+        fg = fillFG
+        glyph = "█"
+      } else if i == full, hasPartial {
+        fg = fillFG
+        glyph = partial[rem]
+      }
+      if let holdPos, i == holdPos {
+        fg = holdFG
+        glyph = "▏"
+      }
+      s += Ansi.fg256(fg) + glyph
+    }
+    return s
+  }
+
   static func renderColoredSmooth(fraction: Double, width: Int, fillFG: Int, trackFG: Int, trackBG: Int) -> String {
     let w = max(1, width)
     let t = max(0.0, min(1.0, fraction))

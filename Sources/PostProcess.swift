@@ -8,10 +8,57 @@ import Foundation
 /// Why: some players (QuickTime) only play one audio track at a time. Keeping per-source tracks enables
 /// editing control, while the master provides a convenient default.
 enum PostProcess {
+  enum AudioSourceKind: Sendable, Equatable {
+    case microphone
+    case system
+    case unknown
+  }
+
+  enum MasterTrackPosition: Sendable {
+    case first
+    case last
+  }
+
+  struct PlannedSource {
+    var track: AVAssetTrack
+    var kind: AudioSourceKind
+    var label: String
+  }
+
   struct AudioPlan {
-    /// (track, label)
-    var sources: [(AVAssetTrack, String)]
+    var sources: [PlannedSource]
     var wantsMaster: Bool
+  }
+
+  struct MixConfig: Sendable {
+    var microphoneGainDB: Float = 0
+    var systemGainDB: Float = 0
+    var safeMixLimiter: Bool = true
+
+    func gainLinear(for kind: AudioSourceKind) -> Float {
+      let db: Float
+      switch kind {
+      case .microphone:
+        db = microphoneGainDB
+      case .system:
+        db = systemGainDB
+      case .unknown:
+        db = 0
+      }
+      if db == 0 { return 1 }
+      return powf(10, db / 20.0)
+    }
+  }
+
+  enum ReplaceError: Error, LocalizedError {
+    case failedToReplace(original: URL, temporary: URL, underlying: Error)
+
+    var errorDescription: String? {
+      switch self {
+      case let .failedToReplace(original, temporary, underlying):
+        return "Failed to replace output file \(original.path) with temporary file \(temporary.path): \(underlying.localizedDescription)"
+      }
+    }
   }
 
   static func planForTracks(_ tracks: [AVAssetTrack], includeSystemAudio: Bool, includeMicrophone: Bool) -> AudioPlan {
@@ -20,20 +67,22 @@ enum PostProcess {
     // 2) system audio (if enabled)
     //
     // When only one is enabled, there's only one audio track.
-    var sources: [(AVAssetTrack, String)] = []
+    var sources: [PlannedSource] = []
     var i = 0
     if includeMicrophone, i < tracks.count {
-      sources.append((tracks[i], "Microphone"))
+      sources.append(PlannedSource(track: tracks[i], kind: .microphone, label: "Microphone"))
       i += 1
     }
     if includeSystemAudio, i < tracks.count {
-      sources.append((tracks[i], "System Audio"))
+      sources.append(PlannedSource(track: tracks[i], kind: .system, label: "System Audio"))
       i += 1
     }
 
     // If the above mapping didn't match (e.g. older files), fall back to generic labels.
     if sources.isEmpty && !tracks.isEmpty {
-      sources = tracks.enumerated().map { ($0.element, "Audio \($0.offset + 1)") }
+      sources = tracks.enumerated().map {
+        PlannedSource(track: $0.element, kind: .unknown, label: "Audio \($0.offset + 1)")
+      }
     }
 
     return AudioPlan(sources: sources, wantsMaster: !sources.isEmpty)
@@ -43,7 +92,9 @@ enum PostProcess {
     url: URL,
     includeSystemAudio: Bool,
     includeMicrophone: Bool,
-    forceMaster: Bool = false
+    forceMaster: Bool = false,
+    mixConfig: MixConfig = MixConfig(),
+    masterTrackPosition: MasterTrackPosition = .first
   ) async throws {
     let asset = AVURLAsset(url: url)
     let audioTracks = try await asset.loadTracks(withMediaType: .audio)
@@ -56,16 +107,32 @@ enum PostProcess {
     let tmpURL = url.deletingLastPathComponent()
       .appendingPathComponent(".capa-tmp-\(UUID().uuidString).mov")
 
-    try await rewriteWithMasterAudio(asset: asset, plan: plan, outputURL: tmpURL)
+    try await rewriteWithMasterAudio(
+      asset: asset,
+      plan: plan,
+      mixConfig: mixConfig,
+      outputURL: tmpURL,
+      masterTrackPosition: masterTrackPosition
+    )
 
-    // Atomic-ish replace on same volume.
     let fm = FileManager.default
-    _ = try? fm.replaceItemAt(url, withItemAt: tmpURL, backupItemName: nil, options: .usingNewMetadataOnly)
+    do {
+      _ = try fm.replaceItemAt(url, withItemAt: tmpURL, backupItemName: nil, options: .usingNewMetadataOnly)
+    } catch {
+      // Keep tmpURL on failure so the caller can recover the rewritten media.
+      throw ReplaceError.failedToReplace(original: url, temporary: tmpURL, underlying: error)
+    }
   }
 
   // MARK: - Implementation
 
-  private static func rewriteWithMasterAudio(asset: AVAsset, plan: AudioPlan, outputURL: URL) async throws {
+  private static func rewriteWithMasterAudio(
+    asset: AVAsset,
+    plan: AudioPlan,
+    mixConfig: MixConfig,
+    outputURL: URL,
+    masterTrackPosition: MasterTrackPosition
+  ) async throws {
     let videoTracks = try await asset.loadTracks(withMediaType: .video)
     guard !videoTracks.isEmpty else {
       throw NSError(domain: "PostProcess", code: 1, userInfo: [NSLocalizedDescriptionKey: "Missing video track"])
@@ -179,11 +246,13 @@ enum PostProcess {
       AVEncoderBitRateKey: 160_000,
     ]
 
-    // Keep the original writer ordering: microphone first, then system audio.
     let orderedSources = plan.sources
 
-    var sourceAudio: [(label: String, out: AVAssetReaderTrackOutput, input: AVAssetWriterInput)] = []
-    for (track, label) in orderedSources {
+    var sourceAudio: [(kind: AudioSourceKind, label: String, out: AVAssetReaderTrackOutput, input: AVAssetWriterInput, gain: Float)] = []
+    for source in orderedSources {
+      let track = source.track
+      let kind = source.kind
+      let label = source.label
       let out = AVAssetReaderTrackOutput(track: track, outputSettings: pcmSettings)
       out.alwaysCopiesSampleData = false
       guard reader.canAdd(out) else {
@@ -194,21 +263,22 @@ enum PostProcess {
       let input = AVAssetWriterInput(mediaType: .audio, outputSettings: aacSettings)
       input.expectsMediaDataInRealTime = false
       input.metadata = [trackTitle(label)]
-      if label == "System Audio" {
+      switch kind {
+      case .system:
         input.languageCode = "qab"
         input.extendedLanguageTag = "qab-x-capa-system"
-      } else {
+      case .microphone:
         input.languageCode = "qac"
         input.extendedLanguageTag = "qac-x-capa-mic"
+      case .unknown:
+        break
       }
       guard writer.canAdd(input) else {
         throw NSError(domain: "PostProcess", code: 11, userInfo: [NSLocalizedDescriptionKey: "Cannot add audio writer input (\(label))"])
       }
-      writer.add(input)
-      sourceAudio.append((label: label, out: out, input: input))
+      sourceAudio.append((kind: kind, label: label, out: out, input: input, gain: mixConfig.gainLinear(for: kind)))
     }
 
-    // Add master last; it's primarily a reference mix for alignment in post.
     let masterIn = AVAssetWriterInput(mediaType: .audio, outputSettings: aacSettings)
     masterIn.expectsMediaDataInRealTime = false
     masterIn.metadata = [trackTitle("Master (Mixed)")]
@@ -217,7 +287,14 @@ enum PostProcess {
     guard writer.canAdd(masterIn) else {
       throw NSError(domain: "PostProcess", code: 12, userInfo: [NSLocalizedDescriptionKey: "Cannot add master audio input"])
     }
-    writer.add(masterIn)
+    switch masterTrackPosition {
+    case .first:
+      writer.add(masterIn)
+      for src in sourceAudio { writer.add(src.input) }
+    case .last:
+      for src in sourceAudio { writer.add(src.input) }
+      writer.add(masterIn)
+    }
 
     guard reader.startReading() else {
       throw reader.error ?? NSError(domain: "PostProcess", code: 20, userInfo: [NSLocalizedDescriptionKey: "Reader failed to start"])
@@ -280,6 +357,7 @@ enum PostProcess {
         var label: String
         var out: AVAssetReaderTrackOutput
         var input: AVAssetWriterInput
+        var gain: Float
         var seed: CMSampleBuffer?
         var pending: [CMSampleBuffer] = []
         var segments: [Segment] = []
@@ -299,6 +377,7 @@ enum PostProcess {
       var videos: [VideoSource]
       var sources: [AudioSource]
       let masterIn: AVAssetWriterInput
+      let safeMixLimiter: Bool
       let sampleRate: Int
       let channels: Int
       let chunkFrames: Int = 1024
@@ -313,8 +392,9 @@ enum PostProcess {
       init(
         writer: AVAssetWriter,
         video: [VideoPipe],
-        sources: [(label: String, out: AVAssetReaderTrackOutput, input: AVAssetWriterInput)],
+        sources: [(label: String, out: AVAssetReaderTrackOutput, input: AVAssetWriterInput, gain: Float)],
         masterIn: AVAssetWriterInput,
+        safeMixLimiter: Bool,
         sampleRate: Int,
         channels: Int,
         firstVideo: [CMSampleBuffer],
@@ -325,8 +405,9 @@ enum PostProcess {
         self.videos = zip(video, firstVideo).map { pipe, first in
           VideoSource(title: pipe.title, out: pipe.out, input: pipe.input, seed: first)
         }
-        self.sources = sources.map { AudioSource(label: $0.label, out: $0.out, input: $0.input) }
+        self.sources = sources.map { AudioSource(label: $0.label, out: $0.out, input: $0.input, gain: $0.gain) }
         self.masterIn = masterIn
+        self.safeMixLimiter = safeMixLimiter
         self.sampleRate = sampleRate
         self.channels = channels
         self.srScale = CMTimeScale(sampleRate)
@@ -464,14 +545,25 @@ enum PostProcess {
             sbuf = sources[i].out.copyNextSampleBuffer()
           }
           if let sbuf {
-            sources[i].pending.append(sbuf)
             let pts = CMSampleBufferGetPresentationTimeStamp(sbuf)
             let start = ptsToSamples(pts)
             let frames = CMSampleBufferGetNumSamples(sbuf)
             if frames > 0 {
-              let floats = try extractFloats(sbuf)
+              var floats = try extractFloats(sbuf)
+              let g = sources[i].gain
+              if g != 1 {
+                for j in floats.indices { floats[j] *= g }
+              }
               sources[i].segments.append(Segment(start: start, frames: frames, data: floats))
               sources[i].readEnd = max(sources[i].readEnd, start + Int64(frames))
+              if g != 1 {
+                let gained = try makePCMSampleBuffer(startIndex: start, frames: frames, samples: floats)
+                sources[i].pending.append(gained)
+              } else {
+                sources[i].pending.append(sbuf)
+              }
+            } else {
+              sources[i].pending.append(sbuf)
             }
           } else {
             sources[i].finishedReading = true
@@ -488,7 +580,6 @@ enum PostProcess {
 
       func mixChunk(startIndex: Int64, frames: Int) -> [Float] {
         var out = Array(repeating: Float(0), count: frames * channels)
-        let gain = 1.0 / Float(max(1, sources.count))
         for i in sources.indices {
           popExpiredSegments(for: i, before: startIndex)
           var remainingFrames = frames
@@ -515,17 +606,50 @@ enum PostProcess {
             let srcBase = segOffset * channels
             let dstBase = dstFrame * channels
             for s in 0..<(use * channels) {
-              out[dstBase + s] += seg.data[srcBase + s] * gain
+              out[dstBase + s] += seg.data[srcBase + s]
             }
             dstFrame += use
             remainingFrames -= use
           }
         }
+        applySafeMixLimiter(&out)
         for i in out.indices {
           if out[i] > 1 { out[i] = 1 }
           else if out[i] < -1 { out[i] = -1 }
         }
         return out
+      }
+
+      private var limiterGain: Float = 1
+
+      private func applySafeMixLimiter(_ samples: inout [Float]) {
+        guard safeMixLimiter else { return }
+
+        // Simple peak limiter with instant attack and short release. Keeps the master convenient to listen to
+        // without hard clipping when multiple sources are active.
+        // AAC (and other perceptual codecs) can produce inter-sample overs on decode even when PCM samples
+        // are kept below 0 dBFS. Target a slightly lower sample peak to keep the "safe mix" reliably clean.
+        let threshold: Float = 0.7079458 // -3.0 dBFS
+        var peak: Float = 0
+        for v in samples { peak = max(peak, abs(v)) }
+
+        if peak <= 0 {
+          limiterGain += (1 - limiterGain) * 0.10
+          limiterGain = min(1, limiterGain)
+          return
+        }
+
+        let target = min(1, threshold / peak)
+        if target < limiterGain {
+          limiterGain = target
+        } else {
+          limiterGain += (1 - limiterGain) * 0.10
+          limiterGain = min(1, limiterGain)
+        }
+
+        if limiterGain != 1 {
+          for i in samples.indices { samples[i] *= limiterGain }
+        }
       }
 
       func minReadEnd() -> Int64 {
@@ -641,8 +765,9 @@ enum PostProcess {
     let driver = Driver(
       writer: writer,
       video: videoPipes,
-      sources: sourceAudio,
+      sources: sourceAudio.map { (label: $0.label, out: $0.out, input: $0.input, gain: $0.gain) },
       masterIn: masterIn,
+      safeMixLimiter: mixConfig.safeMixLimiter,
       sampleRate: Int(sampleRate),
       channels: channels,
       firstVideo: firstVideo,

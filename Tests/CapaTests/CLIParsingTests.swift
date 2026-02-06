@@ -10,13 +10,33 @@ final class CLIParsingTests: XCTestCase {
     XCTAssertEqual(cmd.displayIndex, 2)
   }
 
-  func testParseSystemAudioAndFPS() throws {
-    let parsed = try Capa.parseAsRoot(["--system-audio", "--fps", "30"])
+  func testParseAudioAndFPS() throws {
+    let parsed = try Capa.parseAsRoot(["--audio", "system", "--fps", "30"])
     guard let cmd = parsed as? Capa else {
       return XCTFail("Failed to parse as Capa")
     }
-    XCTAssertTrue(cmd.systemAudioFlag)
+    XCTAssertEqual(cmd.audioSpec, "system")
     XCTAssertEqual(cmd.fps, 30)
+  }
+
+  func testParseAudioFlexibleOrderAndSafeMixOff() throws {
+    let parsed = try Capa.parseAsRoot([
+      "--audio", "system+++mic",
+      "--safe-mix", "off",
+    ])
+    guard let cmd = parsed as? Capa else {
+      return XCTFail("Failed to parse as Capa")
+    }
+    XCTAssertEqual(cmd.audioSpec, "system+++mic")
+    XCTAssertEqual(cmd.safeMixMode, .off)
+  }
+
+  func testParseAudioMicOnly() throws {
+    let parsed = try Capa.parseAsRoot(["--audio", "mic"])
+    guard let cmd = parsed as? Capa else {
+      return XCTFail("Failed to parse as Capa")
+    }
+    XCTAssertEqual(cmd.audioSpec, "mic")
   }
 
   func testParseVFRFlag() throws {

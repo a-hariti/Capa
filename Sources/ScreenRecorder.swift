@@ -32,8 +32,8 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptur
     var cameraDeviceID: String?
     var cameraOutputURL: URL?
 
-    /// Called on the recorder's IO queue with a best-effort dBFS estimate.
-    var onAudioLevel: (@Sendable (AudioSource, Float) -> Void)?
+    /// Called on the recorder's IO queue with a best-effort peak dBFS estimate + clip indicator.
+    var onAudioLevel: (@Sendable (AudioSource, AudioPeak) -> Void)?
 
     /// Shared metadata used to identify files that should align in post.
     var timecodeSync: TimecodeSyncContext?
@@ -473,8 +473,8 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptur
     guard options.includeMicrophone else { return }
     guard CMSampleBufferDataIsReady(sample) else { return }
 
-    if let onAudioLevel = options.onAudioLevel, let db = AudioLevels.peakDBFS(from: sample) {
-      onAudioLevel(.microphone, db)
+    if let onAudioLevel = options.onAudioLevel, let peak = AudioLevels.peak(from: sample) {
+      onAudioLevel(.microphone, peak)
     }
 
     enqueueAudio(sample: sample, into: &micQueue, readIndex: &micQueueReadIndex)
@@ -492,8 +492,8 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptur
     guard options.includeSystemAudio else { return }
     guard CMSampleBufferDataIsReady(sample) else { return }
 
-    if let onAudioLevel = options.onAudioLevel, let db = AudioLevels.peakDBFS(from: sample) {
-      onAudioLevel(.system, db)
+    if let onAudioLevel = options.onAudioLevel, let peak = AudioLevels.peak(from: sample) {
+      onAudioLevel(.system, peak)
     }
 
     enqueueAudio(sample: sample, into: &systemQueue, readIndex: &systemQueueReadIndex)
