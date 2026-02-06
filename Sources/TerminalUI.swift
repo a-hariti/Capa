@@ -336,7 +336,6 @@ final class ElapsedTicker {
   private var startTime: DispatchTime?
   private var lastPrintedVisibleLen: Int = 0
   private var cursorHidden = false
-  private var running = false
 
   init(
     prefix: String = "⏺︎",
@@ -360,7 +359,6 @@ final class ElapsedTicker {
   func start() {
     guard timer == nil else { return }
     startTime = .now()
-    running = true
     hideCursor()
 
     let t = DispatchSource.makeTimerSource(queue: queue)
@@ -376,7 +374,6 @@ final class ElapsedTicker {
     queue.sync { self.tick() }
 
     timer = nil
-    running = false
     t.cancel()
     // Drain any enqueued timer callbacks so no stale redraw can print after stop.
     queue.sync {}
@@ -385,7 +382,7 @@ final class ElapsedTicker {
   }
 
   private func tick() {
-    guard running, let startTime else { return }
+    guard timer != nil, let startTime else { return }
     let elapsed = max(0, Int((DispatchTime.now().uptimeNanoseconds - startTime.uptimeNanoseconds) / 1_000_000_000))
     let timerText = TUITheme.title(format(elapsedSeconds: elapsed))
     let base = "\(TUITheme.recordingDot(prefix)) \(timerText)"
