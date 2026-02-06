@@ -44,6 +44,8 @@ enum VideoCFR {
     let reader = try AVAssetReader(asset: asset)
     let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
 
+    let timecodeTracks = try await asset.loadTracks(withMediaType: .timecode)
+
     struct VideoSetup {
       let out: AVAssetReaderTrackOutput
       let input: AVAssetWriterInput
@@ -167,6 +169,37 @@ enum VideoCFR {
       }
     }
 
+    // Timecode passthrough (preserve editor sync metadata).
+    struct TimecodePipe {
+      let out: AVAssetReaderTrackOutput
+      let input: AVAssetWriterInput
+    }
+    var timecodePipes: [TimecodePipe] = []
+    if !timecodeTracks.isEmpty {
+      for (i, t) in timecodeTracks.enumerated() {
+        let out = AVAssetReaderTrackOutput(track: t, outputSettings: nil)
+        out.alwaysCopiesSampleData = false
+        if reader.canAdd(out) { reader.add(out) }
+
+        let hint = (try await t.load(.formatDescriptions)).first
+        let input = AVAssetWriterInput(mediaType: .timecode, outputSettings: nil, sourceFormatHint: hint)
+        input.expectsMediaDataInRealTime = false
+        input.metadata = [trackTitle(timecodeTracks.count == 1 ? "Timecode" : "Timecode \(i + 1)")]
+        input.languageCode = (try? await t.load(.languageCode)) ?? nil
+        input.extendedLanguageTag = (try? await t.load(.extendedLanguageTag)) ?? nil
+        if writer.canAdd(input) {
+          writer.add(input)
+          timecodePipes.append(TimecodePipe(out: out, input: input))
+        }
+      }
+
+      if let tcIn = timecodePipes.first?.input {
+        for v in videoSetups {
+          v.input.addTrackAssociation(withTrackOf: tcIn, type: AVAssetTrack.AssociationType.timecode.rawValue)
+        }
+      }
+    }
+
     guard reader.startReading() else {
       throw reader.error ?? NSError(domain: "VideoCFR", code: 6, userInfo: [NSLocalizedDescriptionKey: "Reader failed to start"])
     }
@@ -203,6 +236,19 @@ enum VideoCFR {
     }
 
     writer.startSession(atSourceTime: minPTS)
+
+    // Append timecode samples synchronously before driving video/audio.
+    for p in timecodePipes {
+      while let sbuf = p.out.copyNextSampleBuffer() {
+        while !p.input.isReadyForMoreMediaData {
+          try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        if !p.input.append(sbuf) {
+          throw writer.error ?? NSError(domain: "VideoCFR", code: 25, userInfo: [NSLocalizedDescriptionKey: "Timecode append failed"])
+        }
+      }
+      p.input.markAsFinished()
+    }
 
     let q = DispatchQueue(label: "capa.cfr")
 

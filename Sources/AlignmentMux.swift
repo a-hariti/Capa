@@ -78,6 +78,37 @@ enum AlignmentMux {
       pipes.append(Pipe(out: out, input: input, title: title))
     }
 
+    // Preserve timecode tracks (passthrough).
+    let timecodeTracks = try await cameraAsset.loadTracks(withMediaType: .timecode)
+    var timecodeInputs: [AVAssetWriterInput] = []
+    if !timecodeTracks.isEmpty {
+      for (i, t) in timecodeTracks.enumerated() {
+        let out = AVAssetReaderTrackOutput(track: t, outputSettings: nil)
+        out.alwaysCopiesSampleData = false
+        if cameraReader.canAdd(out) { cameraReader.add(out) }
+
+        let hint = (try await t.load(.formatDescriptions)).first
+        let input = AVAssetWriterInput(mediaType: .timecode, outputSettings: nil, sourceFormatHint: hint)
+        input.expectsMediaDataInRealTime = false
+        input.metadata = [trackTitle(timecodeTracks.count == 1 ? "Timecode" : "Timecode \(i + 1)")]
+        input.languageCode = (try? await t.load(.languageCode)) ?? nil
+        input.extendedLanguageTag = (try? await t.load(.extendedLanguageTag)) ?? nil
+        if writer.canAdd(input) {
+          writer.add(input)
+          timecodeInputs.append(input)
+          pipes.append(Pipe(out: out, input: input, title: "Timecode"))
+        }
+      }
+
+      if let tcIn = timecodeInputs.first {
+        for i in 0..<min(videoTracks.count, pipes.count) {
+          if pipes[i].input.mediaType == .video {
+            pipes[i].input.addTrackAssociation(withTrackOf: tcIn, type: AVAssetTrack.AssociationType.timecode.rawValue)
+          }
+        }
+      }
+    }
+
     // Existing audio passthrough (keep secondary recording's own audio first).
     let audioTracks = try await cameraAsset.loadTracks(withMediaType: .audio)
     for (i, t) in audioTracks.enumerated() {

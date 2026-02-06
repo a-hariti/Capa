@@ -777,6 +777,23 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptur
       }
       cw.startSession(atSourceTime: startPTS)
 
+      if let sync = options.timecodeSync, let cameraTimecodeIn, cw.status == .writing {
+        let sbuf = try sync.makeTimecodeSampleBuffer(
+          presentationTimeStamp: startPTS,
+          duration: CMTime(value: 1, timescale: CMTimeScale(max(1, sync.fps)))
+        )
+        if !cameraTimecodeIn.append(sbuf) {
+          throw NSError(
+            domain: "ScreenRecorder",
+            code: 47,
+            userInfo: [
+              NSLocalizedDescriptionKey: "Timecode append failed (camera start)",
+              NSUnderlyingErrorKey: cw.error as Any,
+            ]
+          )
+        }
+      }
+
       cameraWriter = cw
       cameraVideoIn = camIn
       cameraAdaptor = camAd
@@ -829,6 +846,23 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptur
     }
     writer.startSession(atSourceTime: startPTS)
 
+    if let sync = options.timecodeSync, let timecodeIn, writer.status == .writing {
+      let sbuf = try sync.makeTimecodeSampleBuffer(
+        presentationTimeStamp: startPTS,
+        duration: CMTime(value: 1, timescale: CMTimeScale(max(1, sync.fps)))
+      )
+      if !timecodeIn.append(sbuf) {
+        throw NSError(
+          domain: "ScreenRecorder",
+          code: 46,
+          userInfo: [
+            NSLocalizedDescriptionKey: "Timecode append failed (screen start)",
+            NSUnderlyingErrorKey: writer.error as Any,
+          ]
+        )
+      }
+    }
+
     self.writer = writer
     self.videoIn = videoIn
     self.videoAdaptor = adaptor
@@ -854,18 +888,6 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptur
       throw NSError(domain: "ScreenRecorder", code: 40, userInfo: [NSLocalizedDescriptionKey: "No frames captured (writer never started)"])
     }
 
-    if
-      let sync = options.timecodeSync,
-      let sessionStartPTS,
-      let timecodeIn,
-      writer.status == .writing
-    {
-      let duration = positiveDuration(start: sessionStartPTS, end: lastPTS, fps: sync.fps)
-      let sbuf = try sync.makeTimecodeSampleBuffer(presentationTimeStamp: sessionStartPTS, duration: duration)
-      if !timecodeIn.append(sbuf) {
-        throw writer.error ?? NSError(domain: "ScreenRecorder", code: 46, userInfo: [NSLocalizedDescriptionKey: "Failed to append timecode sample"])
-      }
-    }
     if writer.status == .writing {
       writer.endSession(atSourceTime: lastPTS)
     }
@@ -875,19 +897,6 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptur
     systemAudioIn?.markAsFinished()
     timecodeIn?.markAsFinished()
 
-    if
-      let sync = options.timecodeSync,
-      let sessionStartPTS,
-      let cameraWriter,
-      cameraWriter.status == .writing,
-      let cameraTimecodeIn
-    {
-      let duration = positiveDuration(start: sessionStartPTS, end: cameraLastPTS, fps: sync.fps)
-      let sbuf = try sync.makeTimecodeSampleBuffer(presentationTimeStamp: sessionStartPTS, duration: duration)
-      if !cameraTimecodeIn.append(sbuf) {
-        throw cameraWriter.error ?? NSError(domain: "ScreenRecorder", code: 47, userInfo: [NSLocalizedDescriptionKey: "Failed to append camera timecode sample"])
-      }
-    }
     if let cameraWriter, cameraWriter.status == .writing {
       cameraWriter.endSession(atSourceTime: cameraLastPTS)
     }
@@ -918,12 +927,5 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptur
     item.value = title as NSString
     item.dataType = kCMMetadataBaseDataType_UTF8 as String
     return item
-  }
-
-  private func positiveDuration(start: CMTime, end: CMTime, fps: Int) -> CMTime {
-    let oneFrame = CMTime(value: 1, timescale: CMTimeScale(max(1, fps)))
-    let d = end - start
-    if d.isValid && d > .zero { return d }
-    return oneFrame
   }
 }

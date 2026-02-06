@@ -1,6 +1,13 @@
 import Foundation
 import Darwin
 
+func fitTickerLine(base: String, suffix: String?, maxColumns: Int?) -> String {
+  guard let suffix, !suffix.isEmpty else { return base }
+  let withSuffix = "\(base)  \(suffix)"
+  guard let maxColumns, maxColumns > 0 else { return withSuffix }
+  return Ansi.visibleWidth(withSuffix) <= maxColumns ? withSuffix : base
+}
+
 enum Key {
   case up
   case down
@@ -302,10 +309,12 @@ final class ElapsedTicker {
   private let prefix: String
   private let tickInterval: DispatchTimeInterval
   private let suffix: (@Sendable () -> String)?
+  private let queue = DispatchQueue(label: "capa.elapsed-ticker")
   private var timer: DispatchSourceTimer?
   private var startTime: DispatchTime?
   private var lastPrintedVisibleLen: Int = 0
   private var cursorHidden = false
+  private var running = false
 
   init(
     prefix: String = "⏺︎",
@@ -329,9 +338,10 @@ final class ElapsedTicker {
   func start() {
     guard timer == nil else { return }
     startTime = .now()
+    running = true
     hideCursor()
 
-    let t = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+    let t = DispatchSource.makeTimerSource(queue: queue)
     t.schedule(deadline: .now(), repeating: tickInterval, leeway: .milliseconds(50))
     t.setEventHandler { [weak self] in self?.tick() }
     timer = t
@@ -341,22 +351,22 @@ final class ElapsedTicker {
   func stop() {
     guard let t = timer else { return }
     timer = nil
+    running = false
     t.cancel()
+    // Drain any enqueued timer callbacks so no stale redraw can print after stop.
+    queue.sync {}
     showCursor()
     writeLine("\n")
   }
 
   private func tick() {
-    guard let startTime else { return }
+    guard running, let startTime else { return }
     let elapsed = max(0, Int((DispatchTime.now().uptimeNanoseconds - startTime.uptimeNanoseconds) / 1_000_000_000))
     let timerText = TUITheme.title(format(elapsedSeconds: elapsed))
-    var s = "\(TUITheme.recordingDot(prefix)) \(timerText)"
-    if let suffix {
-      let extra = suffix()
-      if !extra.isEmpty {
-        s += "  " + extra
-      }
-    }
+    let base = "\(TUITheme.recordingDot(prefix)) \(timerText)"
+    let extra = suffix?()
+    let columns = Terminal.columns(fileno(fd))
+    let s = fitTickerLine(base: base, suffix: extra, maxColumns: columns)
 
     // Re-write the same line, padding any leftover characters.
     let visibleLen = Ansi.visibleWidth(s)
@@ -392,5 +402,15 @@ final class ElapsedTicker {
     cursorHidden = false
     // ANSI: show cursor
     writeLine(Ansi.showCursor)
+  }
+}
+
+extension Terminal {
+  static func columns(_ fd: Int32) -> Int? {
+    var ws = winsize()
+    if ioctl(fd, TIOCGWINSZ, &ws) == 0, ws.ws_col > 0 {
+      return Int(ws.ws_col)
+    }
+    return nil
   }
 }

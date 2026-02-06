@@ -1,28 +1,6 @@
 import AVFoundation
 import CoreMedia
-import AudioToolbox
-
 enum AudioEncoding {
-  private static func channelLayoutData(channels: Int) -> Data? {
-    let tag: AudioChannelLayoutTag
-    switch channels {
-    case 1:
-      tag = kAudioChannelLayoutTag_Mono
-    case 2:
-      tag = kAudioChannelLayoutTag_Stereo
-    default:
-      return nil
-    }
-
-    var layout = AudioChannelLayout(
-      mChannelLayoutTag: tag,
-      mChannelBitmap: AudioChannelBitmap(rawValue: 0),
-      mNumberChannelDescriptions: 0,
-      mChannelDescriptions: AudioChannelDescription()
-    )
-    return Data(bytes: &layout, count: MemoryLayout<AudioChannelLayout>.size)
-  }
-
   static func aacSettings(sampleRate: Double, channels: Int, baseline: [String: Any]?) -> [String: Any] {
     var settings = baseline ?? [
       AVFormatIDKey: kAudioFormatMPEG4AAC,
@@ -42,14 +20,9 @@ enum AudioEncoding {
       settings[AVSampleRateKey] = 48_000.0
     }
     settings[AVNumberOfChannelsKey] = max(1, channels)
-
-    // AVOutputSettingsAssistant frequently provides AVChannelLayoutKey (as Data).
-    // If we override channel count, we must also fix the layout or AVAssetWriterInput will throw.
-    if let data = channelLayoutData(channels: channels) {
-      settings[AVChannelLayoutKey] = data
-    } else {
-      settings.removeValue(forKey: AVChannelLayoutKey)
-    }
+    // AVOutputSettingsAssistant often includes AVChannelLayoutKey; it can mismatch when inputs are mono.
+    // Let AVAssetWriter infer the layout from channel count + source format hint.
+    settings.removeValue(forKey: AVChannelLayoutKey)
 
     // Keep bitrate sane for mono inputs (e.g. AirPods 24kHz/1ch).
     if let br = settings[AVEncoderBitRateKey] as? Int {

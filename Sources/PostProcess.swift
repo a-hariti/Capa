@@ -70,6 +70,7 @@ enum PostProcess {
     guard !videoTracks.isEmpty else {
       throw NSError(domain: "PostProcess", code: 1, userInfo: [NSLocalizedDescriptionKey: "Missing video track"])
     }
+    let timecodeTracks = try await asset.loadTracks(withMediaType: .timecode)
 
     let reader = try AVAssetReader(asset: asset)
     let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
@@ -125,6 +126,38 @@ enum PostProcess {
       writer.add(input)
 
       videoPipes.append(VideoPipe(title: title, out: out, input: input))
+    }
+
+    // Preserve timecode tracks (passthrough). These are small but important for editor sync.
+    struct TimecodePipe {
+      let out: AVAssetReaderTrackOutput
+      let input: AVAssetWriterInput
+    }
+    var timecodePipes: [TimecodePipe] = []
+    if !timecodeTracks.isEmpty {
+      for (i, t) in timecodeTracks.enumerated() {
+        let out = AVAssetReaderTrackOutput(track: t, outputSettings: nil)
+        out.alwaysCopiesSampleData = false
+        if reader.canAdd(out) { reader.add(out) }
+
+        let hint = (try await t.load(.formatDescriptions)).first
+        let input = AVAssetWriterInput(mediaType: .timecode, outputSettings: nil, sourceFormatHint: hint)
+        input.expectsMediaDataInRealTime = false
+        input.metadata = [trackTitle(timecodeTracks.count == 1 ? "Timecode" : "Timecode \(i + 1)")]
+        input.languageCode = (try? await t.load(.languageCode)) ?? nil
+        input.extendedLanguageTag = (try? await t.load(.extendedLanguageTag)) ?? nil
+        if writer.canAdd(input) {
+          writer.add(input)
+          timecodePipes.append(TimecodePipe(out: out, input: input))
+        }
+      }
+
+      // Associate all video tracks with the first timecode track (best-effort).
+      if let tcIn = timecodePipes.first?.input {
+        for vp in videoPipes {
+          vp.input.addTrackAssociation(withTrackOf: tcIn, type: AVAssetTrack.AssociationType.timecode.rawValue)
+        }
+      }
     }
 
     // Decode audio to a common PCM format for mixing and re-encode sources + master to AAC.
@@ -217,6 +250,20 @@ enum PostProcess {
       }
     }
     writer.startSession(atSourceTime: minPTS)
+
+    // Append timecode samples synchronously before starting the main driver.
+    // These tracks are tiny (often 1 sample) so a small spin is fine and avoids complicating the main driver.
+    for p in timecodePipes {
+      while let sbuf = p.out.copyNextSampleBuffer() {
+        while !p.input.isReadyForMoreMediaData {
+          try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        if !p.input.append(sbuf) {
+          throw writer.error ?? NSError(domain: "PostProcess", code: 25, userInfo: [NSLocalizedDescriptionKey: "Timecode append failed"])
+        }
+      }
+      p.input.markAsFinished()
+    }
 
     // Drive writer readiness the idiomatic way (Apple docs): requestMediaDataWhenReady.
     // We coordinate all tracks from a single serial queue.

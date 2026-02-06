@@ -30,4 +30,15 @@ final class TerminalWidgetsTests: XCTestCase {
     XCTAssertTrue(s.contains("dB"))
     XCTAssertGreaterThan(Ansi.visibleWidth(s), 0)
   }
+
+  func testFitTickerLineDropsSuffixWhenTooWide() {
+    let base = "REC 00:10"
+    let suffix = "MIC -20dB ████████  SYS -30dB ████████"
+    let narrow = fitTickerLine(base: base, suffix: suffix, maxColumns: 10)
+    XCTAssertEqual(narrow, base)
+
+    let wide = fitTickerLine(base: base, suffix: suffix, maxColumns: 120)
+    XCTAssertNotEqual(wide, base)
+    XCTAssertTrue(wide.contains(suffix))
+  }
 }

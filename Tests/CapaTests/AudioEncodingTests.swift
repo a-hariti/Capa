@@ -16,6 +16,6 @@ final class AudioEncodingTests: XCTestCase {
     XCTAssertEqual(s[AVSampleRateKey] as? Double, 48_000)
     XCTAssertEqual(s[AVNumberOfChannelsKey] as? Int, 1)
     XCTAssertEqual(s[AVEncoderBitRateKey] as? Int, 96_000)
-    XCTAssertNotNil(s[AVChannelLayoutKey] as? Data)
+    XCTAssertNil(s[AVChannelLayoutKey])
   }
 }
