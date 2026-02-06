@@ -2,12 +2,12 @@ import XCTest
 @testable import capa
 
 final class CLIParsingTests: XCTestCase {
-  func testParseDisplayIndex() throws {
-    let parsed = try Capa.parseAsRoot(["--display-index", "2"])
+  func testParseDisplaySelection() throws {
+    let parsed = try Capa.parseAsRoot(["--display", "2"])
     guard let cmd = parsed as? Capa else {
       return XCTFail("Failed to parse as Capa")
     }
-    XCTAssertEqual(cmd.displayIndex, 2)
+    XCTAssertEqual(cmd.displaySelector, "2")
   }
 
   func testParseAudioAndFPS() throws {

@@ -58,9 +58,28 @@ enum CameraSelection: Sendable {
   case id(String)
 }
 
+enum DisplaySelection: Sendable {
+  case index(Int)
+  case id(UInt32)
+}
+
 enum MicrophoneSelection: Sendable {
   case index(Int)
   case id(String)
+}
+
+func parseDisplaySelection(_ raw: String) throws -> DisplaySelection {
+  let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+  if value.isEmpty {
+    throw ValidationError("Invalid --display value: empty")
+  }
+  if let index = Int(value) {
+    return .index(index)
+  }
+  if let id = UInt32(value) {
+    return .id(id)
+  }
+  throw ValidationError("Invalid --display value '\(raw)'; expected an index or displayID")
 }
 
 func parseCameraSelection(_ raw: String) throws -> CameraSelection {
@@ -100,8 +119,8 @@ struct Capa: AsyncParsableCommand {
   @Flag(name: [.customLong("list-cameras")], help: "List available cameras and exit")
   var listCameras = false
 
-  @Option(name: .customLong("display-index"), help: "Select display by index (from --list-displays)")
-  var displayIndex: Int?
+  @Option(name: .customLong("display"), help: "Select display by index (from --list-displays) or displayID")
+  var displaySelector: String?
 
   @Option(name: .customLong("mic"), help: "Select microphone by index (from --list-mics) or AVCaptureDevice.uniqueID")
   var microphoneSelector: String?
@@ -140,8 +159,11 @@ struct Capa: AsyncParsableCommand {
   var verbose = false
 
   mutating func validate() throws {
-    if let displayIndex, displayIndex < 0 {
-      throw ValidationError("--display-index must be >= 0")
+    if let displaySelector {
+      let parsed = try parseDisplaySelection(displaySelector)
+      if case .index(let displayIndex) = parsed, displayIndex < 0 {
+        throw ValidationError("--display must be >= 0 when using an index")
+      }
     }
     if let microphoneSelector {
       let parsed = try parseMicrophoneSelection(microphoneSelector)
@@ -322,18 +344,35 @@ struct Capa: AsyncParsableCommand {
     var cameraDefaultIndex = 0
     var codecDefaultIndex = 0
 
-    if let idx = displayIndex {
-      guard idx >= 0 && idx < content.displays.count else {
-        print("Error: --display-index out of range (0...\(content.displays.count - 1))")
-        return
+    let parsedDisplaySelection = try displaySelector.map(parseDisplaySelection)
+
+    if let parsedDisplaySelection {
+      switch parsedDisplaySelection {
+      case .index(let idx):
+        if idx >= 0 && idx < content.displays.count {
+          selectedDisplayIndex = idx
+          displayDefaultIndex = idx
+        } else if let id = UInt32(exactly: idx), let resolvedIndex = content.displays.firstIndex(where: { $0.displayID == id }) {
+          // Numeric displayIDs can look like integers; fall back to ID resolution before failing.
+          selectedDisplayIndex = resolvedIndex
+          displayDefaultIndex = resolvedIndex
+        } else {
+          print("Error: --display index out of range (0...\(content.displays.count - 1))")
+          return
+        }
+      case .id(let id):
+        guard let resolvedIndex = content.displays.firstIndex(where: { $0.displayID == id }) else {
+          print("Error: no display with id \(id)")
+          return
+        }
+        selectedDisplayIndex = resolvedIndex
+        displayDefaultIndex = resolvedIndex
       }
-      selectedDisplayIndex = idx
-      displayDefaultIndex = idx
     } else if content.displays.count == 1 {
       selectedDisplayIndex = 0
       displayDefaultIndex = 0
     } else if nonInteractive {
-      print("Error: missing display selection; use --display-index (or omit --non-interactive).")
+      print("Error: missing display selection; use --display (or omit --non-interactive).")
       return
     }
 
@@ -414,7 +453,7 @@ struct Capa: AsyncParsableCommand {
     if !nonInteractive && selectedProjectName == nil {
       steps.append(.projectName)
     }
-    if !nonInteractive { steps.append(.display) }
+    if parsedDisplaySelection == nil && !nonInteractive { steps.append(.display) }
     if audioRouting == nil { steps.append(.audio) }
     if parsedMicrophoneSelection == nil && !nonInteractive && !audioDevices.isEmpty {
       steps.append(.microphone)
