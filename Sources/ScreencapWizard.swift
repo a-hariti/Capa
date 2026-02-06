@@ -63,6 +63,11 @@ enum DisplaySelection: Sendable {
   case id(UInt32)
 }
 
+enum FPSSelection: Sendable {
+  case cfr(Int)
+  case vfr
+}
+
 enum MicrophoneSelection: Sendable {
   case index(Int)
   case id(String)
@@ -104,6 +109,20 @@ func parseMicrophoneSelection(_ raw: String) throws -> MicrophoneSelection {
   return .id(value)
 }
 
+func parseFPSSelection(_ raw: String) throws -> FPSSelection {
+  let value = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+  if value.isEmpty {
+    throw ValidationError("Invalid --fps value: empty")
+  }
+  if value == "vfr" {
+    return .vfr
+  }
+  guard let fps = Int(value) else {
+    throw ValidationError("Invalid --fps value '\(raw)'; expected an integer or 'vfr'")
+  }
+  return .cfr(fps)
+}
+
 @main
 struct Capa: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
@@ -134,11 +153,8 @@ struct Capa: AsyncParsableCommand {
   @Option(name: .customLong("safe-mix"), help: "Safe master limiter: on|off")
   var safeMixMode: OnOffMode = .on
 
-  @Flag(name: .customLong("vfr"), help: "Keep variable frame rate (skip CFR post-process)")
-  var keepVFR = false
-
-  @Option(name: .customLong("fps"), help: "Post-process SCREEN recording to constant frame rate (default: 60 fps)")
-  var fps: Int?
+  @Option(name: .customLong("fps"), help: "Screen timing mode: integer CFR fps or 'vfr' (default: 60)")
+  var fpsSelector: String?
 
   @Option(name: .customLong("codec"), help: "Video codec (h264|hevc)")
   var codecString: String?
@@ -183,8 +199,11 @@ struct Capa: AsyncParsableCommand {
     if let codecString, parseCodec(codecString) == nil {
       throw ValidationError("Invalid --codec: \(codecString) (expected: h264|hevc)")
     }
-    if let fps, fps < 1 {
-      throw ValidationError("--fps must be >= 1")
+    if let fpsSelector {
+      let parsed = try parseFPSSelection(fpsSelector)
+      if case .cfr(let fps) = parsed, fps < 1 {
+        throw ValidationError("--fps must be >= 1 when using an integer")
+      }
     }
     if let projectName, projectName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
       throw ValidationError("--project-name must not be empty")
@@ -706,15 +725,16 @@ struct Capa: AsyncParsableCommand {
     }
 
     let cfrFPS: Int?
-    if keepVFR {
-      if fps != nil {
-        print("Warning: --vfr overrides --fps; CFR post-processing is disabled.")
+    let parsedFPSSelection = try fpsSelector.map(parseFPSSelection)
+    if let parsedFPSSelection {
+      switch parsedFPSSelection {
+      case .vfr:
+        cfrFPS = nil
+      case .cfr(let fps):
+        cfrFPS = max(1, min(240, fps))
       }
-      cfrFPS = nil
-    } else if let v = fps {
-      cfrFPS = max(1, min(240, v))
     } else {
-      // Default to CFR 60; users can opt out with --vfr.
+      // Default to CFR 60; users can opt in to VFR with `--fps vfr`.
       cfrFPS = 60
     }
     let timecodeSync: TimecodeSyncContext? = includeCamera ? TimecodeSyncContext(fps: cfrFPS ?? 60) : nil
@@ -809,7 +829,7 @@ struct Capa: AsyncParsableCommand {
       print(sectionTitle("Settings:"))
       print(muted("  Capture: \(Int(geometry.sourceRect.width))x\(Int(geometry.sourceRect.height)) pt @ \(scaleStr)x => \(geometry.pixelWidth)x\(geometry.pixelHeight) px"))
       print(muted("  Video: \(codecName) \(geometry.pixelWidth)x\(geometry.pixelHeight) @ native refresh"))
-      if keepVFR {
+      if cfrFPS == nil {
         print(muted("  Screen timing: VFR"))
       } else {
         print(muted("  Screen timing: CFR \(cfrFPS ?? 60) fps"))
