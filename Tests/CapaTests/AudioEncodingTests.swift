@@ -13,8 +13,9 @@ final class AudioEncodingTests: XCTestCase {
 
     let s = AudioEncoding.aacSettings(sampleRate: 24_000, channels: 1, baseline: baseline)
     XCTAssertEqual(s[AVFormatIDKey] as? UInt32, kAudioFormatMPEG4AAC)
-    XCTAssertEqual(s[AVSampleRateKey] as? Double, 24_000)
+    XCTAssertEqual(s[AVSampleRateKey] as? Double, 48_000)
     XCTAssertEqual(s[AVNumberOfChannelsKey] as? Int, 1)
     XCTAssertEqual(s[AVEncoderBitRateKey] as? Int, 96_000)
+    XCTAssertNotNil(s[AVChannelLayoutKey] as? Data)
   }
 }

@@ -664,6 +664,14 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptur
     var systemAudioIn: AVAssetWriterInput?
     var timecodeIn: AVAssetWriterInput?
     let baselineAudioSettings = assistant.audioSettings
+    let micFormatHint: CMFormatDescription? = {
+      guard options.includeMicrophone, let firstMicSample else { return nil }
+      return CMSampleBufferGetFormatDescription(firstMicSample)
+    }()
+    let systemFormatHint: CMFormatDescription? = {
+      guard options.includeSystemAudio, let firstSystemAudioSample else { return nil }
+      return CMSampleBufferGetFormatDescription(firstSystemAudioSample)
+    }()
     let micAudioSettings: [String: Any]? = {
       guard options.includeMicrophone, let firstMicSample else { return nil }
       guard let (sr, ch) = AudioEncoding.sampleRateAndChannels(from: firstMicSample) else { return nil }
@@ -743,7 +751,7 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptur
         guard let micAudioSettings else {
           throw NSError(domain: "ScreenRecorder", code: 90, userInfo: [NSLocalizedDescriptionKey: "Microphone enabled but missing microphone format"])
         }
-        let aIn = AVAssetWriterInput(mediaType: .audio, outputSettings: micAudioSettings)
+        let aIn = AVAssetWriterInput(mediaType: .audio, outputSettings: micAudioSettings, sourceFormatHint: micFormatHint)
         aIn.expectsMediaDataInRealTime = true
         aIn.metadata = [trackTitle("Microphone")]
         aIn.languageCode = "qac"
@@ -778,7 +786,7 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptur
       guard let micAudioSettings else {
         throw NSError(domain: "ScreenRecorder", code: 91, userInfo: [NSLocalizedDescriptionKey: "Microphone enabled but missing microphone format"])
       }
-      let aIn = AVAssetWriterInput(mediaType: .audio, outputSettings: micAudioSettings)
+      let aIn = AVAssetWriterInput(mediaType: .audio, outputSettings: micAudioSettings, sourceFormatHint: micFormatHint)
       aIn.expectsMediaDataInRealTime = true
       aIn.metadata = [trackTitle("Microphone")]
       aIn.languageCode = "qac"
@@ -793,7 +801,7 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptur
       guard let systemAudioSettings else {
         throw NSError(domain: "ScreenRecorder", code: 92, userInfo: [NSLocalizedDescriptionKey: "System audio enabled but missing system audio format"])
       }
-      let aIn = AVAssetWriterInput(mediaType: .audio, outputSettings: systemAudioSettings)
+      let aIn = AVAssetWriterInput(mediaType: .audio, outputSettings: systemAudioSettings, sourceFormatHint: systemFormatHint)
       aIn.expectsMediaDataInRealTime = true
       aIn.metadata = [trackTitle("System Audio")]
       // Use distinct language tags so editors/players can differentiate tracks.
