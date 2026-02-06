@@ -60,18 +60,30 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptur
   // the first delivered camera sample.
   private var cameraFormatHint: CMFormatDescription?
 
-  private var writer: AVAssetWriter?
-  private var videoIn: AVAssetWriterInput?
-  private var videoAdaptor: AVAssetWriterInputPixelBufferAdaptor?
-  private var micAudioIn: AVAssetWriterInput?
-  private var systemAudioIn: AVAssetWriterInput?
-  private var timecodeIn: AVAssetWriterInput?
+  private struct RecordingContext {
+    let writer: AVAssetWriter
+    let videoIn: AVAssetWriterInput
+    let videoAdaptor: AVAssetWriterInputPixelBufferAdaptor
+    let micAudioIn: AVAssetWriterInput?
+    let systemAudioIn: AVAssetWriterInput?
+    let timecodeIn: AVAssetWriterInput?
+    let cameraWriter: AVAssetWriter?
+    let cameraVideoIn: AVAssetWriterInput?
+    let cameraAdaptor: AVAssetWriterInputPixelBufferAdaptor?
+    let cameraMicAudioIn: AVAssetWriterInput?
+    let cameraTimecodeIn: AVAssetWriterInput?
+    let sessionStartPTS: CMTime
+  }
 
-  private var cameraWriter: AVAssetWriter?
-  private var cameraVideoIn: AVAssetWriterInput?
-  private var cameraAdaptor: AVAssetWriterInputPixelBufferAdaptor?
-  private var cameraMicAudioIn: AVAssetWriterInput?
-  private var cameraTimecodeIn: AVAssetWriterInput?
+  private enum State {
+    case idle
+    case preparing
+    case recording(RecordingContext)
+    case stopping(RecordingContext)
+    case failed(Error)
+  }
+
+  private var state: State = .idle
 
   // We must not drop audio samples just because the writer input has backpressure.
   // Dropping can produce perceptual artifacts (metallic/echoey audio). Buffer and drain instead.
@@ -89,11 +101,8 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptur
   private var firstCameraSample: CMSampleBuffer?
   private var cameraPTSOffset: CMTime = .zero
 
-  private var isStopping = false
   private var lastPTS: CMTime = .zero
   private var cameraLastPTS: CMTime = .zero
-  private var sessionStartPTS: CMTime?
-  private var failure: (any Error)?
 
   private var firstMicSample: CMSampleBuffer?
   private var firstSystemAudioSample: CMSampleBuffer?
@@ -125,15 +134,21 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptur
     do {
       try await stream.stopCapture()
     } catch {
-      ioQueue.async { self.failure = self.failure ?? error }
+      ioQueue.async {
+        if case .recording = self.state {
+          self.state = .failed(error)
+        }
+      }
     }
 
-    try await withCheckedThrowingContinuation { cont in
+    try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
       ioQueue.async {
         do {
           self.stopCameraLockedIfNeeded()
-          // After capture is stopped, prevent any late enqueued samples from being processed.
-          self.isStopping = true
+          // Transition to stopping but KEEP the context so finishLocked can use it.
+          if case let .recording(ctx) = self.state {
+            self.state = .stopping(ctx)
+          }
           try self.finishLocked()
           cont.resume(returning: ())
         } catch {
@@ -153,7 +168,14 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptur
   // MARK: - SCStreamDelegate
 
   func stream(_ stream: SCStream, didStopWithError error: any Error) {
-    ioQueue.async { self.failure = self.failure ?? error }
+    ioQueue.async {
+      switch self.state {
+      case .recording, .preparing:
+        self.state = .failed(error)
+      default:
+        break
+      }
+    }
   }
 
   // MARK: - Internals (ioQueue only)
@@ -193,17 +215,7 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptur
     }
 
     self.stream = stream
-    self.writer = nil
-    self.videoIn = nil
-    self.videoAdaptor = nil
-    self.micAudioIn = nil
-    self.systemAudioIn = nil
-    self.timecodeIn = nil
-    self.cameraWriter = nil
-    self.cameraVideoIn = nil
-    self.cameraAdaptor = nil
-    self.cameraMicAudioIn = nil
-    self.cameraTimecodeIn = nil
+    self.state = .preparing
     self.micQueue = []
     self.micQueueReadIndex = 0
     self.cameraMicQueue = []
@@ -218,18 +230,15 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptur
     self.firstSystemAudioSample = nil
     self.cameraFormatHint = nil
     self.cameraPTSOffset = .zero
-    self.failure = nil
-    self.isStopping = false
     self.lastPTS = .zero
     self.cameraLastPTS = .zero
-    self.sessionStartPTS = nil
     return stream
   }
 
   private func handleLocked(sample: UnsafeSample) {
     precondition(!Thread.isMainThread)
-    if isStopping { return }
-    if failure != nil { return }
+    if case .stopping = state { return }
+    if case .failed = state { return }
 
     switch sample.type {
     case .screen:
@@ -276,7 +285,7 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptur
     let pts = CMSampleBufferGetPresentationTimeStamp(sample)
 
     do {
-      if sessionStartPTS == nil {
+      if case .preparing = state {
         // Buffer until we can start the writer session (need camera's first sample too, if enabled).
         enqueueVideoPreStart(sample: sample, into: &preStartScreen)
         if firstScreenSample == nil { firstScreenSample = sample }
@@ -286,32 +295,32 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptur
 
       flushPreStartVideoLockedIfNeeded()
 
-      guard let writer, let videoIn, let videoAdaptor else { return }
-      guard writer.status == .writing else { return }
-      guard videoIn.isReadyForMoreMediaData else { return }
+      guard case let .recording(ctx) = state else { return }
+      guard ctx.writer.status == .writing else { return }
+      guard ctx.videoIn.isReadyForMoreMediaData else { return }
 
-      if !videoAdaptor.append(pixelBuffer, withPresentationTime: pts) {
-        throw writer.error ?? NSError(domain: "ScreenRecorder", code: 11, userInfo: [NSLocalizedDescriptionKey: "Video append failed (status: \(writer.status))"])
+      if !ctx.videoAdaptor.append(pixelBuffer, withPresentationTime: pts) {
+        throw ctx.writer.error ?? NSError(domain: "ScreenRecorder", code: 11, userInfo: [NSLocalizedDescriptionKey: "Video append failed (status: \(ctx.writer.status))"])
       }
 
       lastPTS = max(lastPTS, pts)
       drainAudioLocked()
     } catch {
-      failure = error
+      state = .failed(error)
     }
   }
 
   private func handleCameraLocked(sample: CMSampleBuffer) {
     guard options.includeCamera else { return }
-    guard !isStopping else { return }
-    guard failure == nil else { return }
+    if case .stopping = state { return }
+    if case .failed = state { return }
     guard CMSampleBufferDataIsReady(sample) else { return }
     guard let pixelBuffer = CMSampleBufferGetImageBuffer(sample) else { return }
 
     let pts = CMSampleBufferGetPresentationTimeStamp(sample) + cameraPTSOffset
 
     do {
-      if sessionStartPTS == nil {
+      if case .preparing = state {
         enqueueVideoPreStart(sample: sample, into: &preStartCamera)
         if firstCameraSample == nil { firstCameraSample = sample }
         try startWriterIfReadyLocked()
@@ -320,7 +329,8 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptur
 
       flushPreStartVideoLockedIfNeeded()
 
-      guard let cameraWriter, let cameraVideoIn, let cameraAdaptor else { return }
+      guard case let .recording(ctx) = state,
+            let cameraWriter = ctx.cameraWriter, let cameraVideoIn = ctx.cameraVideoIn, let cameraAdaptor = ctx.cameraAdaptor else { return }
       guard cameraWriter.status == .writing else { return }
       guard cameraVideoIn.isReadyForMoreMediaData else { return }
 
@@ -331,7 +341,7 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptur
       cameraLastPTS = max(cameraLastPTS, pts)
       drainAudioLocked()
     } catch {
-      failure = error
+      state = .failed(error)
     }
   }
 
@@ -398,8 +408,7 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptur
 
   private func startWriterIfReadyLocked() throws {
     precondition(!Thread.isMainThread)
-    guard sessionStartPTS == nil else { return }
-    guard writer == nil && cameraWriter == nil else { return } // writer/session start happen together
+    guard case .preparing = state else { return }
     guard let firstScreenSample else { return }
     if options.includeCamera && firstCameraSample == nil { return }
     if options.includeMicrophone && firstMicSample == nil { return }
@@ -423,8 +432,8 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptur
 
   private func flushPreStartVideoLockedIfNeeded() {
     precondition(!Thread.isMainThread)
-    guard failure == nil else { return }
-    guard let sessionStartPTS else { return }
+    if case .failed = state { return }
+    guard case let .recording(ctx) = state else { return }
 
     func drain(
       queue: inout [CMSampleBuffer],
@@ -437,27 +446,27 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptur
       while !queue.isEmpty && input.isReadyForMoreMediaData {
         let s = queue.removeFirst()
         let pts = adjustPTS(CMSampleBufferGetPresentationTimeStamp(s))
-        if pts < sessionStartPTS { continue }
+        if pts < ctx.sessionStartPTS { continue }
         guard let pb = CMSampleBufferGetImageBuffer(s) else { continue }
         if !adaptor.append(pb, withPresentationTime: pts) {
-          failure = writer.error ?? NSError(domain: "ScreenRecorder", code: 13, userInfo: [NSLocalizedDescriptionKey: "Video append failed (prestart)"])
+          state = .failed(writer.error ?? NSError(domain: "ScreenRecorder", code: 13, userInfo: [NSLocalizedDescriptionKey: "Video append failed (prestart)"]))
           return
         }
         updateLastPTS(pts)
       }
     }
 
-    if let writer, writer.status == .writing, let videoIn, let videoAdaptor, !preStartScreen.isEmpty {
+    if ctx.writer.status == .writing, !preStartScreen.isEmpty {
       drain(
         queue: &preStartScreen,
-        writer: writer,
-        input: videoIn,
-        adaptor: videoAdaptor,
+        writer: ctx.writer,
+        input: ctx.videoIn,
+        adaptor: ctx.videoAdaptor,
         adjustPTS: { $0 },
         updateLastPTS: { self.lastPTS = max(self.lastPTS, $0) }
       )
     }
-    if let cameraWriter, cameraWriter.status == .writing, let cameraVideoIn, let cameraAdaptor, !preStartCamera.isEmpty {
+    if let cameraWriter = ctx.cameraWriter, cameraWriter.status == .writing, let cameraVideoIn = ctx.cameraVideoIn, let cameraAdaptor = ctx.cameraAdaptor, !preStartCamera.isEmpty {
       drain(
         queue: &preStartCamera,
         writer: cameraWriter,
@@ -481,9 +490,9 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptur
     if options.includeCamera {
       enqueueAudio(sample: sample, into: &cameraMicQueue, readIndex: &cameraMicQueueReadIndex)
     }
-    if sessionStartPTS == nil {
+    if case .preparing = state {
       if firstMicSample == nil { firstMicSample = sample }
-      do { try startWriterIfReadyLocked() } catch { failure = error }
+      do { try startWriterIfReadyLocked() } catch { state = .failed(error) }
     }
     drainAudioLocked()
   }
@@ -497,9 +506,9 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptur
     }
 
     enqueueAudio(sample: sample, into: &systemQueue, readIndex: &systemQueueReadIndex)
-    if sessionStartPTS == nil {
+    if case .preparing = state {
       if firstSystemAudioSample == nil { firstSystemAudioSample = sample }
-      do { try startWriterIfReadyLocked() } catch { failure = error }
+      do { try startWriterIfReadyLocked() } catch { state = .failed(error) }
     }
     drainAudioLocked()
   }
@@ -517,8 +526,8 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptur
 
   private func drainAudioLocked() {
     precondition(!Thread.isMainThread)
-    guard failure == nil else { return }
-    guard let sessionStartPTS else { return }
+    if case .failed = state { return }
+    guard case let .recording(ctx) = state else { return }
 
     func drain(
       queue: inout [CMSampleBuffer],
@@ -531,17 +540,16 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptur
         let s = queue[readIndex]
         readIndex += 1
         let pts = CMSampleBufferGetPresentationTimeStamp(s)
-        if pts < sessionStartPTS { continue }
+        if pts < ctx.sessionStartPTS { continue }
         if !input.append(s) {
-          let underlying = writer.error
-          failure = NSError(
+          state = .failed(NSError(
             domain: "ScreenRecorder",
             code: 21,
             userInfo: [
               NSLocalizedDescriptionKey: "Audio append failed (status: \(writer.status))",
-              NSUnderlyingErrorKey: underlying as Any,
+              NSUnderlyingErrorKey: writer.error as Any,
             ]
-          )
+          ))
           return
         }
         updateLastPTS(pts)
@@ -557,25 +565,25 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptur
       }
     }
 
-    if let writer, writer.status == .writing, let micAudioIn {
+    if let micAudioIn = ctx.micAudioIn {
       drain(
         queue: &micQueue,
         readIndex: &micQueueReadIndex,
-        writer: writer,
+        writer: ctx.writer,
         input: micAudioIn,
         updateLastPTS: { self.lastPTS = max(self.lastPTS, $0) }
       )
     }
-    if let writer, writer.status == .writing, let systemAudioIn {
+    if let systemAudioIn = ctx.systemAudioIn {
       drain(
         queue: &systemQueue,
         readIndex: &systemQueueReadIndex,
-        writer: writer,
+        writer: ctx.writer,
         input: systemAudioIn,
         updateLastPTS: { self.lastPTS = max(self.lastPTS, $0) }
       )
     }
-    if options.includeCamera, let cameraWriter, cameraWriter.status == .writing, let cameraMicAudioIn {
+    if let cameraWriter = ctx.cameraWriter, let cameraMicAudioIn = ctx.cameraMicAudioIn {
       drain(
         queue: &cameraMicQueue,
         readIndex: &cameraMicQueueReadIndex,
@@ -863,18 +871,21 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptur
       }
     }
 
-    self.writer = writer
-    self.videoIn = videoIn
-    self.videoAdaptor = adaptor
-    self.micAudioIn = micAudioIn
-    self.systemAudioIn = systemAudioIn
-    self.timecodeIn = timecodeIn
-    self.cameraWriter = cameraWriter
-    self.cameraVideoIn = cameraVideoIn
-    self.cameraAdaptor = cameraAdaptor
-    self.cameraMicAudioIn = cameraMicAudioIn
-    self.cameraTimecodeIn = cameraTimecodeIn
-    self.sessionStartPTS = startPTS
+    let ctx = RecordingContext(
+      writer: writer,
+      videoIn: videoIn,
+      videoAdaptor: adaptor,
+      micAudioIn: micAudioIn,
+      systemAudioIn: systemAudioIn,
+      timecodeIn: timecodeIn,
+      cameraWriter: cameraWriter,
+      cameraVideoIn: cameraVideoIn,
+      cameraAdaptor: cameraAdaptor,
+      cameraMicAudioIn: cameraMicAudioIn,
+      cameraTimecodeIn: cameraTimecodeIn,
+      sessionStartPTS: startPTS
+    )
+    self.state = .recording(ctx)
 
     // Flush any audio samples that arrived before video started.
     drainAudioLocked()
@@ -883,40 +894,44 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate, AVCaptur
   private func finishLocked() throws {
     precondition(!Thread.isMainThread)
 
-    if let failure { throw failure }
-    guard let writer else {
+    if case let .failed(error) = state { throw error }
+    let context: RecordingContext
+    switch state {
+    case let .recording(ctx), let .stopping(ctx):
+      context = ctx
+    default:
       throw NSError(domain: "ScreenRecorder", code: 40, userInfo: [NSLocalizedDescriptionKey: "No frames captured (writer never started)"])
     }
 
-    if writer.status == .writing {
-      writer.endSession(atSourceTime: lastPTS)
+    if context.writer.status == .writing {
+      context.writer.endSession(atSourceTime: lastPTS)
     }
 
-    videoIn?.markAsFinished()
-    micAudioIn?.markAsFinished()
-    systemAudioIn?.markAsFinished()
-    timecodeIn?.markAsFinished()
+    context.videoIn.markAsFinished()
+    context.micAudioIn?.markAsFinished()
+    context.systemAudioIn?.markAsFinished()
+    context.timecodeIn?.markAsFinished()
 
-    if let cameraWriter, cameraWriter.status == .writing {
+    if let cameraWriter = context.cameraWriter, cameraWriter.status == .writing {
       cameraWriter.endSession(atSourceTime: cameraLastPTS)
     }
-    cameraVideoIn?.markAsFinished()
-    cameraMicAudioIn?.markAsFinished()
-    cameraTimecodeIn?.markAsFinished()
+    context.cameraVideoIn?.markAsFinished()
+    context.cameraMicAudioIn?.markAsFinished()
+    context.cameraTimecodeIn?.markAsFinished()
 
     let group = DispatchGroup()
     group.enter()
-    writer.finishWriting { group.leave() }
-    if let cameraWriter {
+    context.writer.finishWriting { group.leave() }
+    if let cameraWriter = context.cameraWriter {
       group.enter()
       cameraWriter.finishWriting { group.leave() }
     }
     group.wait()
 
-    if writer.status == .failed {
-      throw writer.error ?? NSError(domain: "ScreenRecorder", code: 41, userInfo: [NSLocalizedDescriptionKey: "Writer failed"])
+    if context.writer.status == .failed {
+      throw context.writer.error ?? NSError(domain: "ScreenRecorder", code: 41, userInfo: [NSLocalizedDescriptionKey: "Writer failed"])
     }
-    if let cameraWriter, cameraWriter.status == .failed {
+    if let cameraWriter = context.cameraWriter, cameraWriter.status == .failed {
       throw cameraWriter.error ?? NSError(domain: "ScreenRecorder", code: 43, userInfo: [NSLocalizedDescriptionKey: "Camera writer failed"])
     }
   }
