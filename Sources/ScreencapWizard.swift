@@ -510,7 +510,7 @@ struct Capa: AsyncParsableCommand {
     if selectedProjectName == nil {
       selectedProjectName = defaultProjectName
     }
-    guard let selectedProjectName else {
+    guard let projectName = selectedProjectName else {
       print("Error: missing project name.")
       return
     }
@@ -568,12 +568,55 @@ struct Capa: AsyncParsableCommand {
     let recsDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("recs")
     try? FileManager.default.createDirectory(at: recsDir, withIntermediateDirectories: true)
 
+    var finalProjectName = projectName
+
+    func directoryExists(_ url: URL) -> Bool {
+      var isDir: ObjCBool = false
+      return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue
+    }
+    func directoryNonEmpty(_ url: URL) -> Bool {
+      guard directoryExists(url) else { return false }
+      let contents = (try? FileManager.default.contentsOfDirectory(atPath: url.path)) ?? []
+      return !contents.isEmpty
+    }
+    func fileExists(_ url: URL) -> Bool {
+      FileManager.default.fileExists(atPath: url.path)
+    }
+    func ensureUniqueProjectDir(parent: URL, name: String, expectedFilenames: [String]) -> (name: String, dir: URL) {
+      func conflicts(dir: URL) -> Bool {
+        for f in expectedFilenames {
+          if fileExists(dir.appendingPathComponent(f)) { return true }
+        }
+        return directoryNonEmpty(dir)
+      }
+
+      var candidateName = name
+      var candidateDir = parent.appendingPathComponent(candidateName, isDirectory: true)
+      if !conflicts(dir: candidateDir) { return (candidateName, candidateDir) }
+
+      var i = 2
+      while i < 10_000 {
+        candidateName = "\(name)-\(i)"
+        candidateDir = parent.appendingPathComponent(candidateName, isDirectory: true)
+        if !conflicts(dir: candidateDir) { return (candidateName, candidateDir) }
+        i += 1
+      }
+      return (name, parent.appendingPathComponent(name, isDirectory: true))
+    }
+
     let outFile: URL
     let cameraOutFile: URL?
     if let outputPath = outputPath {
       let u = URL(fileURLWithPath: outputPath)
       if u.pathExtension.isEmpty {
-        let projectDir = u.appendingPathComponent(selectedProjectName, isDirectory: true)
+        let cameraFilename: String? = {
+          guard includeCamera else { return nil }
+          if let cameraDevice { return "\(slugifyFilenameStem(cameraDevice.localizedName)).mov" }
+          return "camera.mov"
+        }()
+        let expected = ["screen.mov"] + (cameraFilename.map { [$0] } ?? [])
+        let (uniqueName, projectDir) = ensureUniqueProjectDir(parent: u, name: finalProjectName, expectedFilenames: expected)
+        finalProjectName = uniqueName
         try? FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         outFile = projectDir.appendingPathComponent("screen.mov")
         if includeCamera, let cameraDevice {
@@ -583,7 +626,25 @@ struct Capa: AsyncParsableCommand {
         }
       } else {
         try? FileManager.default.createDirectory(at: u.deletingLastPathComponent(), withIntermediateDirectories: true)
-        outFile = u
+        if fileExists(u) {
+          if nonInteractive {
+            var i = 2
+            var candidate = u
+            while i < 10_000 {
+              let base = u.deletingPathExtension().lastPathComponent
+              let ext = u.pathExtension
+              let alt = u.deletingLastPathComponent().appendingPathComponent("\(base)-\(i).\(ext)")
+              if !fileExists(alt) { candidate = alt; break }
+              i += 1
+            }
+            outFile = candidate
+          } else {
+            print("Error: output file already exists at \(abbreviateHomePath(u.path)). Choose a different --out/--project-name.")
+            return
+          }
+        } else {
+          outFile = u
+        }
         if includeCamera {
           let base = u.deletingPathExtension().lastPathComponent
           cameraOutFile = u.deletingLastPathComponent().appendingPathComponent(base + "-camera.mov")
@@ -592,7 +653,14 @@ struct Capa: AsyncParsableCommand {
         }
       }
     } else {
-      let projectDir = recsDir.appendingPathComponent(selectedProjectName, isDirectory: true)
+      let cameraFilename: String? = {
+        guard includeCamera else { return nil }
+        if let cameraDevice { return "\(slugifyFilenameStem(cameraDevice.localizedName)).mov" }
+        return "camera.mov"
+      }()
+      let expected = ["screen.mov"] + (cameraFilename.map { [$0] } ?? [])
+      let (uniqueName, projectDir) = ensureUniqueProjectDir(parent: recsDir, name: finalProjectName, expectedFilenames: expected)
+      finalProjectName = uniqueName
       try? FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
       outFile = projectDir.appendingPathComponent("screen.mov")
       if includeCamera, let cameraDevice {
