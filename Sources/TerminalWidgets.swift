@@ -195,11 +195,14 @@ struct LoudnessMeter {
     return Double(t)
   }
 
+  static func colorCode(db: Float) -> Int {
+    if db >= -6 { return TUITheme.Color.meterHot } // red
+    if db >= -18 { return TUITheme.Color.meterMid } // yellow
+    return TUITheme.Color.meterLow // green
+  }
+
   static func color(db: Float) -> String {
-    // Rough levels for screen recording.
-    if db >= -12 { return Ansi.fg256(TUITheme.Color.meterHot) } // red
-    if db >= -24 { return Ansi.fg256(TUITheme.Color.meterMid) } // yellow
-    return Ansi.fg256(TUITheme.Color.meterLow) // green
+    Ansi.fg256(colorCode(db: db))
   }
 
   static func render(label: String, db: Float?, holdDB: Float? = nil, clipped: Bool = false, width: Int = 12, style: Bar.Style = .smooth) -> String {
@@ -230,9 +233,7 @@ struct LoudnessMeter {
     switch style {
     case .smooth:
       // For meters, use the db-driven color as the fill, and a fixed dark track.
-      // The color escape in `c` is a foreground; extract the 256 code where possible is not worth it.
-      // Just use green/yellow/red as 46/226/196.
-      let fillFG: Int = (db >= -12) ? TUITheme.Color.meterHot : (db >= -24) ? TUITheme.Color.meterMid : TUITheme.Color.meterLow
+      let fillFG = colorCode(db: db)
       let holdFrac = holdDB.map { fraction(db: $0) }
       bar = Bar.renderMeterSmooth(
         fraction: frac,
