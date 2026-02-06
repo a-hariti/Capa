@@ -42,4 +42,26 @@ final class TerminalWidgetsTests: XCTestCase {
     XCTAssertNotEqual(wide, base)
     XCTAssertTrue(wide.contains(suffix))
   }
+
+  func testLoudnessMeterFraction() {
+    XCTAssertEqual(LoudnessMeter.fraction(db: 0), 1.0)
+    XCTAssertEqual(LoudnessMeter.fraction(db: -60), 0.0)
+    XCTAssertEqual(LoudnessMeter.fraction(db: -30), 0.5)
+  }
+
+  func testLoudnessMeterColorCode() {
+    XCTAssertEqual(LoudnessMeter.colorCode(db: -2), TUITheme.Color.meterHot)
+    XCTAssertEqual(LoudnessMeter.colorCode(db: -12), TUITheme.Color.meterMid)
+    XCTAssertEqual(LoudnessMeter.colorCode(db: -20), TUITheme.Color.meterLow)
+  }
+
+  func testBarRenderColoredSmooth() {
+    let s = Bar.renderColoredSmooth(fraction: 0.5, width: 10, fillFG: 1, trackFG: 2, trackBG: 3)
+    XCTAssertEqual(Ansi.visibleWidth(s), 10)
+  }
+
+  func testBarRenderMeterSmooth() {
+    let s = Bar.renderMeterSmooth(fraction: 0.5, holdFraction: 0.8, width: 10, fillFG: 1, trackFG: 2, trackBG: 3, holdFG: 4)
+    XCTAssertEqual(Ansi.visibleWidth(s), 10)
+  }
 }
