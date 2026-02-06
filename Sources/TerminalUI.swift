@@ -67,10 +67,41 @@ final class Terminal {
     if buffer[0] == 0x08 || buffer[0] == 0x7f { return .backspace }
     if buffer[0] == 0x03 { return .ctrlC }
     if buffer[0] == 0x04 { return .ctrlD }
-    if let scalar = UnicodeScalar(UInt32(buffer[0])) {
-      return .char(Character(scalar))
+    if let c = decodeUTF8Character(startByte: buffer[0], readNextByte: { _ in readByte(timeoutMs: 20) }) {
+      return .char(c)
     }
     return .unknown
+  }
+
+  static func decodeUTF8Character(startByte: UInt8, readNextByte: (_ timeoutMs: Int32) -> UInt8?) -> Character? {
+    let expectedContinuationCount: Int
+    switch startByte {
+    case 0x00...0x7F:
+      expectedContinuationCount = 0
+    case 0xC2...0xDF:
+      expectedContinuationCount = 1
+    case 0xE0...0xEF:
+      expectedContinuationCount = 2
+    case 0xF0...0xF4:
+      expectedContinuationCount = 3
+    default:
+      return nil
+    }
+
+    var bytes: [UInt8] = [startByte]
+    if expectedContinuationCount > 0 {
+      for _ in 0..<expectedContinuationCount {
+        guard let next = readNextByte(20), (next & 0b1100_0000) == 0b1000_0000 else {
+          return nil
+        }
+        bytes.append(next)
+      }
+    }
+
+    guard let s = String(bytes: bytes, encoding: .utf8), s.count == 1, let c = s.first else {
+      return nil
+    }
+    return c
   }
 
   private static func readByte(timeoutMs: Int32) -> UInt8? {

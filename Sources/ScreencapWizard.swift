@@ -61,9 +61,6 @@ struct Capa: AsyncParsableCommand {
   @Option(name: .customLong("project-name"), help: "Project folder name (default: capa-<timestamp>)")
   var projectName: String?
 
-  @Flag(name: .customLong("open"), help: "Open file when done")
-  var openFlag = false
-
   @Flag(name: .customLong("no-open"), help: "Do not open file when done")
   var noOpenFlag = false
 
@@ -82,9 +79,6 @@ struct Capa: AsyncParsableCommand {
     }
     if let cameraIndex, cameraIndex < 0 {
       throw ValidationError("--camera-index must be >= 0")
-    }
-    if openFlag && noOpenFlag {
-      throw ValidationError("Cannot use --open and --no-open together.")
     }
     if let durationSeconds, durationSeconds < 1 {
       throw ValidationError("--duration must be >= 1")
@@ -112,7 +106,7 @@ struct Capa: AsyncParsableCommand {
     func optionText(_ s: String) -> String { isTTYOut ? TUITheme.option(s) : s }
     func sanitizeProjectName(_ s: String) -> String {
       let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
-      if trimmed.isEmpty { return "capture" }
+      if trimmed.isEmpty { return "capa" }
       let forbidden = CharacterSet(charactersIn: "/:\\")
       let mapped = trimmed.unicodeScalars.map { forbidden.contains($0) ? "-" : Character($0) }
       return String(mapped)
@@ -226,6 +220,10 @@ struct Capa: AsyncParsableCommand {
     func clearPreviousAnswerLineIfTTY() {
       guard isTTYOut else { return }
       print("\u{001B}[1A\u{001B}[2K\r", terminator: "")
+    }
+    func clearLinesIfTTY(_ count: Int) {
+      guard count > 0 else { return }
+      for _ in 0..<count { clearPreviousAnswerLineIfTTY() }
     }
 
     var selectedDisplayIndex: Int?
@@ -342,6 +340,16 @@ struct Capa: AsyncParsableCommand {
 
     var singleDisplayLinePrinted = false
     var stepCursor = 0
+    func rewind(to backIdx: Int) {
+      clearLinesIfTTY(1)
+      if steps[backIdx] == .projectName {
+        // Remove spacer + project summary so the editable line is re-rendered cleanly.
+        clearLinesIfTTY(2)
+        singleDisplayLinePrinted = false
+      }
+      stepCursor = backIdx
+    }
+
     while stepCursor < steps.count {
       let allowBack = previousRewindableStepIndex(from: stepCursor) != nil
       switch steps[stepCursor] {
@@ -386,12 +394,7 @@ struct Capa: AsyncParsableCommand {
             stepCursor += 1
           case .back:
             if let backIdx = previousRewindableStepIndex(from: stepCursor) {
-              clearPreviousAnswerLineIfTTY()
-              if steps[backIdx] == .projectName {
-                clearPreviousAnswerLineIfTTY()
-                singleDisplayLinePrinted = false
-              }
-              stepCursor = backIdx
+              rewind(to: backIdx)
             }
           case .cancel:
             print("Canceled.")
@@ -413,12 +416,7 @@ struct Capa: AsyncParsableCommand {
           stepCursor += 1
         case .back:
           if let backIdx = previousRewindableStepIndex(from: stepCursor) {
-            clearPreviousAnswerLineIfTTY()
-            if steps[backIdx] == .projectName {
-              clearPreviousAnswerLineIfTTY()
-              singleDisplayLinePrinted = false
-            }
-            stepCursor = backIdx
+            rewind(to: backIdx)
           }
         case .cancel:
           print("Canceled.")
@@ -446,12 +444,7 @@ struct Capa: AsyncParsableCommand {
           stepCursor += 1
         case .back:
           if let backIdx = previousRewindableStepIndex(from: stepCursor) {
-            clearPreviousAnswerLineIfTTY()
-            if steps[backIdx] == .projectName {
-              clearPreviousAnswerLineIfTTY()
-              singleDisplayLinePrinted = false
-            }
-            stepCursor = backIdx
+            rewind(to: backIdx)
           }
         case .cancel:
           print("Canceled.")
@@ -479,12 +472,7 @@ struct Capa: AsyncParsableCommand {
           stepCursor += 1
         case .back:
           if let backIdx = previousRewindableStepIndex(from: stepCursor) {
-            clearPreviousAnswerLineIfTTY()
-            if steps[backIdx] == .projectName {
-              clearPreviousAnswerLineIfTTY()
-              singleDisplayLinePrinted = false
-            }
-            stepCursor = backIdx
+            rewind(to: backIdx)
           }
         case .cancel:
           print("Canceled.")
@@ -506,12 +494,7 @@ struct Capa: AsyncParsableCommand {
           stepCursor += 1
         case .back:
           if let backIdx = previousRewindableStepIndex(from: stepCursor) {
-            clearPreviousAnswerLineIfTTY()
-            if steps[backIdx] == .projectName {
-              clearPreviousAnswerLineIfTTY()
-              singleDisplayLinePrinted = false
-            }
-            stepCursor = backIdx
+            rewind(to: backIdx)
           }
         case .cancel:
           print("Canceled.")
