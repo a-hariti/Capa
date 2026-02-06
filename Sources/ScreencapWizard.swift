@@ -73,8 +73,7 @@ enum MicrophoneSelection: Sendable {
   case id(String)
 }
 
-final class SharedFlag: @unchecked Sendable {
-  private let lock = NSLock()
+actor SharedFlag {
   private var value: Bool
 
   init(_ initialValue: Bool = false) {
@@ -82,15 +81,11 @@ final class SharedFlag: @unchecked Sendable {
   }
 
   func get() -> Bool {
-    lock.lock()
-    defer { lock.unlock() }
     return value
   }
 
   func set(_ newValue: Bool = true) {
-    lock.lock()
     value = newValue
-    lock.unlock()
   }
 }
 
@@ -1186,7 +1181,7 @@ struct Capa: AsyncParsableCommand {
       let transcodeFinished = SharedFlag(false)
       signal(SIGINT, SIG_IGN)
       let transcodeSigintSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .global())
-      transcodeSigintSource.setEventHandler { skipTranscode.set() }
+      transcodeSigintSource.setEventHandler { Task { await skipTranscode.set() } }
       transcodeSigintSource.resume()
       defer {
         transcodeSigintSource.cancel()
@@ -1194,11 +1189,11 @@ struct Capa: AsyncParsableCommand {
       }
 
       let transcodeTask = Task {
-        defer { transcodeFinished.set() }
+        defer { Task { await transcodeFinished.set() } }
         try await VideoCFR.rewriteInPlace(
           url: outFile,
           fps: cfrFPS,
-          shouldCancel: { skipTranscode.get() },
+          shouldCancel: { await skipTranscode.get() },
           cancelHint: "Escape to skip transcoding"
         )
       }
@@ -1206,9 +1201,12 @@ struct Capa: AsyncParsableCommand {
       if Terminal.isTTY(STDIN_FILENO) {
         Terminal.enableRawMode(disableSignals: true)
         defer { Terminal.disableRawMode() }
-        while !transcodeFinished.get() && !skipTranscode.get() {
+        while true {
+          let finished = await transcodeFinished.get()
+          let skipped = await skipTranscode.get()
+          if finished || skipped { break }
           if readTranscodeSkipKey(timeoutMs: 80) {
-            skipTranscode.set()
+            await skipTranscode.set()
             break
           }
         }

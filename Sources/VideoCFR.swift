@@ -13,7 +13,7 @@ enum VideoCFR {
   static func rewriteInPlace(
     url: URL,
     fps: Int,
-    shouldCancel: @escaping @Sendable () -> Bool = { false },
+    shouldCancel: @escaping @Sendable () async -> Bool = { false },
     cancelHint: String? = nil
   ) async throws {
     let asset = AVURLAsset(url: url)
@@ -64,7 +64,7 @@ enum VideoCFR {
     audioTracks: [AVAssetTrack],
     outputURL: URL,
     fps: Int,
-    shouldCancel: @escaping @Sendable () -> Bool,
+    shouldCancel: @escaping @Sendable () async -> Bool,
     cancelHint: String?
   ) async throws {
     let reader = try AVAssetReader(asset: asset)
@@ -266,11 +266,11 @@ enum VideoCFR {
     // Append timecode samples synchronously before driving video/audio.
     for p in timecodePipes {
       while let sbuf = p.out.copyNextSampleBuffer() {
-        if shouldCancel() {
+        if await shouldCancel() {
           throw Cancelled()
         }
         while !p.input.isReadyForMoreMediaData {
-          if shouldCancel() {
+          if await shouldCancel() {
             throw Cancelled()
           }
           try? await Task.sleep(nanoseconds: 1_000_000)
@@ -290,7 +290,7 @@ enum VideoCFR {
       let fps: Int
       let startPTS: CMTime
       let endPTS: CMTime
-      let shouldCancel: @Sendable () -> Bool
+      let shouldCancel: @Sendable () async -> Bool
 
       struct VideoState {
         let out: AVAssetReaderTrackOutput
@@ -320,7 +320,7 @@ enum VideoCFR {
         fps: Int,
         startPTS: CMTime,
         endPTS: CMTime,
-        shouldCancel: @escaping @Sendable () -> Bool,
+        shouldCancel: @escaping @Sendable () async -> Bool,
         videoSetups: [VideoSetup],
         firstVideo: [CMSampleBuffer],
         audio: [AudioPipe],
@@ -348,10 +348,6 @@ enum VideoCFR {
 
       func failIfNeeded() -> Bool {
         if failure != nil { return true }
-        if shouldCancel() {
-          failure = Cancelled()
-          return true
-        }
         if writer.status == .failed {
           failure = writer.error ?? NSError(domain: "VideoCFR", code: 20, userInfo: [NSLocalizedDescriptionKey: "Writer failed"])
           return true
@@ -537,9 +533,15 @@ enum VideoCFR {
         awaitState.cancelTimer?.setEventHandler {
           if awaitState.finished { return }
           if awaitState.state.failure != nil { return }
-          if awaitState.state.shouldCancel() {
-            awaitState.state.failure = Cancelled()
-            finish(awaitState.state.failure)
+          Task {
+            if await awaitState.state.shouldCancel() {
+              q.async {
+                if awaitState.state.failure == nil {
+                  awaitState.state.failure = Cancelled()
+                  finish(awaitState.state.failure)
+                }
+              }
+            }
           }
         }
         awaitState.cancelTimer?.resume()
