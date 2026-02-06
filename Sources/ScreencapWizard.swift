@@ -53,6 +53,22 @@ struct AudioRouting: Equatable, Sendable {
   }
 }
 
+enum CameraSelection: Sendable {
+  case index(Int)
+  case id(String)
+}
+
+func parseCameraSelection(_ raw: String) throws -> CameraSelection {
+  let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+  if value.isEmpty {
+    throw ValidationError("Invalid --camera value: empty")
+  }
+  if let index = Int(value) {
+    return .index(index)
+  }
+  return .id(value)
+}
+
 @main
 struct Capa: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
@@ -77,14 +93,8 @@ struct Capa: AsyncParsableCommand {
   @Option(name: .customLong("mic-id"), help: "Select microphone by AVCaptureDevice.uniqueID")
   var microphoneID: String?
 
-  @Flag(name: .customLong("camera"), help: "Record a secondary camera video track")
-  var cameraFlag = false
-
-  @Option(name: .customLong("camera-index"), help: "Select camera by index (from --list-cameras)")
-  var cameraIndex: Int?
-
-  @Option(name: .customLong("camera-id"), help: "Select camera by AVCaptureDevice.uniqueID")
-  var cameraID: String?
+  @Option(name: .customLong("camera"), help: "Record camera by index (from --list-cameras) or AVCaptureDevice.uniqueID")
+  var cameraSelector: String?
 
   @Option(name: .customLong("audio"), help: "Audio sources: (none, mic, system, mic+system)")
   var audioSpec: String?
@@ -123,8 +133,11 @@ struct Capa: AsyncParsableCommand {
     if let microphoneIndex, microphoneIndex < 0 {
       throw ValidationError("--mic-index must be >= 0")
     }
-    if let cameraIndex, cameraIndex < 0 {
-      throw ValidationError("--camera-index must be >= 0")
+    if let cameraSelector {
+      let parsed = try parseCameraSelection(cameraSelector)
+      if case .index(let cameraIndex) = parsed, cameraIndex < 0 {
+        throw ValidationError("--camera must be >= 0 when using an index")
+      }
     }
     if let durationSeconds, durationSeconds < 1 {
       throw ValidationError("--duration must be >= 1")
@@ -347,22 +360,23 @@ struct Capa: AsyncParsableCommand {
       audioDevice = nil
     }
 
-    if cameraFlag || cameraIndex != nil || cameraID != nil {
+    let parsedCameraSelection = try cameraSelector.map(parseCameraSelection)
+
+    if let parsedCameraSelection {
       includeCamera = true
-      if let idx = cameraIndex {
+      switch parsedCameraSelection {
+      case .index(let idx):
         guard idx >= 0 && idx < videoDevices.count else {
-          print("Error: --camera-index out of range (0...\(max(0, videoDevices.count - 1)))")
+          print("Error: --camera index out of range (0...\(max(0, videoDevices.count - 1)))")
           return
         }
         cameraDevice = videoDevices[idx]
-      } else if let id = cameraID {
+      case .id(let id):
         guard let d = videoDevices.first(where: { $0.uniqueID == id }) else {
           print("Error: no camera with id \(id)")
           return
         }
         cameraDevice = d
-      } else {
-        cameraDevice = videoDevices.first
       }
     } else if nonInteractive || videoDevices.isEmpty {
       includeCamera = false
@@ -384,7 +398,7 @@ struct Capa: AsyncParsableCommand {
     if microphoneIndex == nil && microphoneID == nil && !nonInteractive && !audioDevices.isEmpty {
       steps.append(.microphone)
     }
-    if !cameraFlag && cameraIndex == nil && cameraID == nil && !nonInteractive && !videoDevices.isEmpty {
+    if parsedCameraSelection == nil && !nonInteractive && !videoDevices.isEmpty {
       steps.append(.camera)
     }
     if codec == nil { steps.append(.codec) }
