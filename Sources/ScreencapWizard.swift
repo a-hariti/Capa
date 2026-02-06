@@ -689,7 +689,16 @@ struct Capa: AsyncParsableCommand {
 
     let scaleStr = String(format: "%.2f", geometry.pointPixelScale)
 
-    let recsDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("recs")
+    let recsDir: URL = {
+#if DEBUG
+      return URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        .appendingPathComponent("recs", isDirectory: true)
+#else
+      return URL(fileURLWithPath: NSHomeDirectory())
+        .appendingPathComponent("Desktop", isDirectory: true)
+        .appendingPathComponent("capa", isDirectory: true)
+#endif
+    }()
     try? FileManager.default.createDirectory(at: recsDir, withIntermediateDirectories: true)
 
     var finalProjectName = projectName
