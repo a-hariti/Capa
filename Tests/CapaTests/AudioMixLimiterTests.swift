@@ -122,141 +122,61 @@ private func writeMovie(url: URL, micAmplitude: Float, sysAmplitude: Float) thro
   var audioPTS = CMTime.zero
   let framesPerChunk = 1024
   let chunkDur = CMTime(value: CMTimeValue(framesPerChunk), timescale: CMTimeScale(sampleRate))
-  let chunks = Int((sampleRate / Double(framesPerChunk)).rounded(.up))
-  for _ in 0..<chunks {
-    while !micIn.isReadyForMoreMediaData || !sysIn.isReadyForMoreMediaData {
-      RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.005))
+      let chunks = Int((sampleRate / Double(framesPerChunk)).rounded(.up))
+      for _ in 0..<chunks {
+        while !micIn.isReadyForMoreMediaData || !sysIn.isReadyForMoreMediaData {
+          RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.005))
+        }
+        let mic = try TestUtils.makePCMSampleBuffer(pts: audioPTS, frames: framesPerChunk, channels: channels, sampleRate: sampleRate, amplitude: micAmplitude, isSine: false)
+        let sys = try TestUtils.makePCMSampleBuffer(pts: audioPTS, frames: framesPerChunk, channels: channels, sampleRate: sampleRate, amplitude: sysAmplitude, isSine: false)
+        guard micIn.append(mic) else {
+          throw writer.error ?? NSError(domain: "AudioMixLimiterTests", code: 5, userInfo: [NSLocalizedDescriptionKey: "append mic failed"])
+        }
+        guard sysIn.append(sys) else {
+          throw writer.error ?? NSError(domain: "AudioMixLimiterTests", code: 6, userInfo: [NSLocalizedDescriptionKey: "append sys failed"])
+        }
+        audioPTS = audioPTS + chunkDur
+      }
+
+      vIn.markAsFinished()
+      micIn.markAsFinished()
+      sysIn.markAsFinished()
+
+      let sema = DispatchSemaphore(value: 0)
+      writer.finishWriting { sema.signal() }
+      sema.wait()
+
+      if writer.status == .failed {
+        throw writer.error ?? NSError(domain: "AudioMixLimiterTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "Writer failed"])
+      }
     }
-    let mic = try makePCMSampleBuffer(pts: audioPTS, frames: framesPerChunk, channels: channels, sampleRate: sampleRate, amplitude: micAmplitude)
-    let sys = try makePCMSampleBuffer(pts: audioPTS, frames: framesPerChunk, channels: channels, sampleRate: sampleRate, amplitude: sysAmplitude)
-    guard micIn.append(mic) else {
-      throw writer.error ?? NSError(domain: "AudioMixLimiterTests", code: 5, userInfo: [NSLocalizedDescriptionKey: "append mic failed"])
+
+    private func makePixelBuffer(width: Int, height: Int, shade: UInt8) throws -> CVPixelBuffer {
+      var pb: CVPixelBuffer?
+      let attrs: [String: Any] = [
+        kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA),
+        kCVPixelBufferWidthKey as String: width,
+        kCVPixelBufferHeightKey as String: height,
+        kCVPixelBufferIOSurfacePropertiesKey as String: [:],
+      ]
+      let status = CVPixelBufferCreate(kCFAllocatorDefault, width, height, kCVPixelFormatType_32BGRA, attrs as CFDictionary, &pb)
+      guard status == kCVReturnSuccess, let pixelBuffer = pb else {
+        throw NSError(domain: "AudioMixLimiterTests", code: 10, userInfo: [NSLocalizedDescriptionKey: "CVPixelBufferCreate failed"])
+      }
+
+      CVPixelBufferLockBaseAddress(pixelBuffer, [])
+      defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, []) }
+
+      guard let base = CVPixelBufferGetBaseAddress(pixelBuffer) else {
+        throw NSError(domain: "AudioMixLimiterTests", code: 11, userInfo: [NSLocalizedDescriptionKey: "No base address"])
+      }
+      let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+      memset(base, Int32(shade), bytesPerRow * height)
+      return pixelBuffer
     }
-    guard sysIn.append(sys) else {
-      throw writer.error ?? NSError(domain: "AudioMixLimiterTests", code: 6, userInfo: [NSLocalizedDescriptionKey: "append sys failed"])
-    }
-    audioPTS = audioPTS + chunkDur
-  }
 
-  vIn.markAsFinished()
-  micIn.markAsFinished()
-  sysIn.markAsFinished()
+    private func peakForAudioTrack(url: URL, languageCode: String) async throws -> AudioPeak {
 
-  let sema = DispatchSemaphore(value: 0)
-  writer.finishWriting { sema.signal() }
-  sema.wait()
-
-  if writer.status == .failed {
-    throw writer.error ?? NSError(domain: "AudioMixLimiterTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "Writer failed"])
-  }
-}
-
-private func makePixelBuffer(width: Int, height: Int, shade: UInt8) throws -> CVPixelBuffer {
-  var pb: CVPixelBuffer?
-  let attrs: [String: Any] = [
-    kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA),
-    kCVPixelBufferWidthKey as String: width,
-    kCVPixelBufferHeightKey as String: height,
-    kCVPixelBufferIOSurfacePropertiesKey as String: [:],
-  ]
-  let status = CVPixelBufferCreate(kCFAllocatorDefault, width, height, kCVPixelFormatType_32BGRA, attrs as CFDictionary, &pb)
-  guard status == kCVReturnSuccess, let pixelBuffer = pb else {
-    throw NSError(domain: "AudioMixLimiterTests", code: 10, userInfo: [NSLocalizedDescriptionKey: "CVPixelBufferCreate failed"])
-  }
-
-  CVPixelBufferLockBaseAddress(pixelBuffer, [])
-  defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, []) }
-
-  guard let base = CVPixelBufferGetBaseAddress(pixelBuffer) else {
-    throw NSError(domain: "AudioMixLimiterTests", code: 11, userInfo: [NSLocalizedDescriptionKey: "No base address"])
-  }
-  let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
-  memset(base, Int32(shade), bytesPerRow * height)
-  return pixelBuffer
-}
-
-private func makePCMSampleBuffer(
-  pts: CMTime,
-  frames: Int,
-  channels: Int,
-  sampleRate: Double,
-  amplitude: Float
-) throws -> CMSampleBuffer {
-  var asbd = AudioStreamBasicDescription(
-    mSampleRate: sampleRate,
-    mFormatID: kAudioFormatLinearPCM,
-    mFormatFlags: kLinearPCMFormatFlagIsFloat | kAudioFormatFlagIsPacked,
-    mBytesPerPacket: UInt32(channels * MemoryLayout<Float>.size),
-    mFramesPerPacket: 1,
-    mBytesPerFrame: UInt32(channels * MemoryLayout<Float>.size),
-    mChannelsPerFrame: UInt32(channels),
-    mBitsPerChannel: 32,
-    mReserved: 0
-  )
-
-  var fmt: CMAudioFormatDescription?
-  let stDesc = CMAudioFormatDescriptionCreate(
-    allocator: kCFAllocatorDefault,
-    asbd: &asbd,
-    layoutSize: 0,
-    layout: nil,
-    magicCookieSize: 0,
-    magicCookie: nil,
-    extensions: nil,
-    formatDescriptionOut: &fmt
-  )
-  guard stDesc == noErr, let fmt else {
-    throw NSError(domain: "AudioMixLimiterTests", code: Int(stDesc), userInfo: [NSLocalizedDescriptionKey: "Failed to create audio format description"])
-  }
-
-  var samples = Array(repeating: Float(0), count: frames * channels)
-  for i in 0..<samples.count { samples[i] = amplitude }
-  let dataLen = samples.count * MemoryLayout<Float>.size
-
-  var block: CMBlockBuffer?
-  let stBlock = CMBlockBufferCreateWithMemoryBlock(
-    allocator: kCFAllocatorDefault,
-    memoryBlock: nil,
-    blockLength: dataLen,
-    blockAllocator: kCFAllocatorDefault,
-    customBlockSource: nil,
-    offsetToData: 0,
-    dataLength: dataLen,
-    flags: 0,
-    blockBufferOut: &block
-  )
-  guard stBlock == kCMBlockBufferNoErr, let block else {
-    throw NSError(domain: "AudioMixLimiterTests", code: Int(stBlock), userInfo: [NSLocalizedDescriptionKey: "Failed to create block buffer"])
-  }
-
-  samples.withUnsafeBytes { bytes in
-    _ = CMBlockBufferReplaceDataBytes(with: bytes.baseAddress!, blockBuffer: block, offsetIntoDestination: 0, dataLength: dataLen)
-  }
-
-  var timing = CMSampleTimingInfo(
-    duration: CMTime(value: 1, timescale: CMTimeScale(sampleRate)),
-    presentationTimeStamp: pts,
-    decodeTimeStamp: .invalid
-  )
-  var sbuf: CMSampleBuffer?
-  let st = CMSampleBufferCreateReady(
-    allocator: kCFAllocatorDefault,
-    dataBuffer: block,
-    formatDescription: fmt,
-    sampleCount: frames,
-    sampleTimingEntryCount: 1,
-    sampleTimingArray: &timing,
-    sampleSizeEntryCount: 0,
-    sampleSizeArray: nil,
-    sampleBufferOut: &sbuf
-  )
-  guard st == noErr, let sbuf else {
-    throw NSError(domain: "AudioMixLimiterTests", code: Int(st), userInfo: [NSLocalizedDescriptionKey: "Failed to create audio sample buffer"])
-  }
-  return sbuf
-}
-
-private func peakForAudioTrack(url: URL, languageCode: String) async throws -> AudioPeak {
   let asset = AVURLAsset(url: url)
   let tracks = try await asset.loadTracks(withMediaType: .audio)
   var chosen: AVAssetTrack?
