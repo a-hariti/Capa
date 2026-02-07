@@ -34,7 +34,7 @@ capa
 
 ### Output Locations
 
-- **Production (release builds)**: recordings are written to `~/Desktop/capa/<project>/...`
+- **Production (release builds)**: recordings are written to `~/Movies/Capa/<project>/...`
   - Applies to `swift run -c release capa` and release binaries (for example `.build/release/capa`).
 - **Development (debug builds)**: recordings are written to `./recs/<project>/...`
   - Applies to `swift run capa` and other debug builds.

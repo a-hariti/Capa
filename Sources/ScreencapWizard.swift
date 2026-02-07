@@ -36,7 +36,7 @@ struct Capa: AsyncParsableCommand {
   @Option(name: .customLong("camera"), help: "Record camera by index (from --list-cameras) or AVCaptureDevice.uniqueID")
   var cameraSelection: CameraSelection?
 
-  @Option(name: .customLong("fps"), help: "Screen timing mode: integer CFR fps or 'vfr' (default: 60)")
+  @Option(name: .customLong("fps"), help: "Screen timing mode: integer CFR fps or 'vfr' (default: vfr, prompts if interactive)")
   var fpsSelection: FPSSelection?
 
   @Option(name: .customLong("codec"), help: "Video codec (h264|hevc)")
@@ -101,6 +101,17 @@ struct Capa: AsyncParsableCommand {
         throw ValidationError("--audio does not include microphone; remove --mic or include mic")
       }
     }
+  }
+
+  static var defaultRecordingDirectory: URL {
+#if DEBUG
+    return URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+      .appendingPathComponent("recs", isDirectory: true)
+#else
+    return URL(fileURLWithPath: NSHomeDirectory())
+      .appendingPathComponent("Movies", isDirectory: true)
+      .appendingPathComponent("Capa", isDirectory: true)
+#endif
   }
 
   mutating func run() async throws {
@@ -685,22 +696,14 @@ struct Capa: AsyncParsableCommand {
         cfrFPS = max(1, min(240, fps))
       }
     } else {
-      cfrFPS = 60
+      // Default to VFR (nil). In interactive mode, we will ask after recording.
+      cfrFPS = nil
     }
     let timecodeSync: TimecodeSyncContext? = includeCamera ? TimecodeSyncContext(fps: cfrFPS ?? 60) : nil
 
     let scaleStr = String(format: "%.2f", geometry.pointPixelScale)
 
-    let recsDir: URL = {
-#if DEBUG
-      return URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-        .appendingPathComponent("recs", isDirectory: true)
-#else
-      return URL(fileURLWithPath: NSHomeDirectory())
-        .appendingPathComponent("Desktop", isDirectory: true)
-        .appendingPathComponent("capa", isDirectory: true)
-#endif
-    }()
+    let recsDir = Capa.defaultRecordingDirectory
     try? FileManager.default.createDirectory(at: recsDir, withIntermediateDirectories: true)
 
     var finalProjectName = projectName
@@ -892,10 +895,86 @@ struct Capa: AsyncParsableCommand {
       }
     }
 
+    var finalCFRFPS: Int? = cfrFPS
+    if finalCFRFPS == nil && !nonInteractive && fpsSelection == nil {
+      enum TranscodeStep : Equatable {
+        case ask, selectFPS, customFPS(dirty: Bool), done
+      }
+      var currentStep: TranscodeStep = .ask
+      while currentStep != .done {
+        switch currentStep {
+        case .ask:
+          let hint = "(Better for video editors, might take a while)"
+          let promptTitle = "Post-process to constant fps? " + (isTTYOut ? TUITheme.label(hint) : hint)
+          let result = selectOptionWithBack(terminal: terminal, title: promptTitle, options: ["Yes", "No (keep VFR)"], defaultIndex: 0, allowBack: false, printSummary: false)
+          switch result {
+          case .selected(let idx):
+            if idx == 0 { currentStep = .selectFPS }
+            else { finalCFRFPS = nil; currentStep = .done }
+          case .back: currentStep = .done
+          case .cancel: return
+          }
+
+        case .selectFPS:
+          let result = selectOptionWithBack(terminal: terminal, title: "Select Target FPS", options: ["30 fps", "60 fps", "120 fps", "Custom..."], defaultIndex: 1, allowBack: true, printSummary: false)
+          switch result {
+          case .selected(let idx):
+            switch idx {
+            case 0: finalCFRFPS = 30; currentStep = .done
+            case 1: finalCFRFPS = 60; currentStep = .done
+            case 2: finalCFRFPS = 120; currentStep = .done
+            default: currentStep = .customFPS(dirty: false)
+            }
+          case .back:
+            if isTTYOut { clearLines(1, isTTY: isTTYOut) }
+            currentStep = .ask
+          case .cancel: return
+          }
+
+        case .customFPS(let dirty):
+          let result = promptEditableDefault(terminal: terminal, title: "Custom FPS", defaultValue: "60")
+          switch result {
+          case .submitted(let val):
+            let trimmed = val.trimmingCharacters(in: .whitespaces)
+            if let intVal = Int(trimmed) {
+              if intVal <= 0 {
+                if dirty && isTTYOut { clearLines(2, isTTY: isTTYOut) }
+                else if isTTYOut { clearLines(1, isTTY: isTTYOut) }
+                let msg = "Invalid input. Please enter a value greater than 0."
+                print(isTTYOut ? TUITheme.muted(msg) : msg)
+                currentStep = .customFPS(dirty: true)
+              } else {
+                if dirty && isTTYOut { clearLines(2, isTTY: isTTYOut) }
+                let clamped = min(240, intVal)
+                if clamped != intVal {
+                  let msg = "Clamped to \(clamped) fps"
+                  print(isTTYOut ? TUITheme.muted(msg) : msg)
+                }
+                finalCFRFPS = clamped
+                currentStep = .done
+              }
+            } else {
+              if dirty && isTTYOut { clearLines(2, isTTY: isTTYOut) }
+              else if isTTYOut { clearLines(1, isTTY: isTTYOut) }
+              let msg = "Invalid input. Please enter a whole number (24, 60 ...)"
+              print(isTTYOut ? TUITheme.muted(msg) : msg)
+              currentStep = .customFPS(dirty: true)
+            }
+          case .cancel:
+            if dirty && isTTYOut { clearLines(2, isTTY: isTTYOut) }
+            currentStep = .selectFPS
+          }
+
+
+        case .done: break
+        }
+      }
+    }
+
     var didSkipCFR = false
-    if let cfrFPS {
+    if let targetFPS = finalCFRFPS {
       print("")
-      print("Post-processing screen video to \(cfrFPS) fps...")
+      print("Post-processing screen video to \(targetFPS) fps...")
 
       let skipTranscode = SharedFlag(false)
       let transcodeFinished = SharedFlag(false)
@@ -912,7 +991,7 @@ struct Capa: AsyncParsableCommand {
         defer { transcodeFinished.set() }
         try await VideoCFR.rewriteInPlace(
           url: outFile,
-          fps: cfrFPS,
+          fps: targetFPS,
           shouldCancel: { skipTranscode.get() },
           cancelHint: "Escape to skip transcoding"
         )
