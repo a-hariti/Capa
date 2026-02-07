@@ -103,6 +103,17 @@ struct Capa: AsyncParsableCommand {
     }
   }
 
+  static var defaultRecordingDirectory: URL {
+#if DEBUG
+    return URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+      .appendingPathComponent("recs", isDirectory: true)
+#else
+    return URL(fileURLWithPath: NSHomeDirectory())
+      .appendingPathComponent("Movies", isDirectory: true)
+      .appendingPathComponent("Capa", isDirectory: true)
+#endif
+  }
+
   mutating func run() async throws {
     let terminal = TerminalController()
     let isTTYOut = TerminalController.isTTY(STDOUT_FILENO)
@@ -692,16 +703,7 @@ struct Capa: AsyncParsableCommand {
 
     let scaleStr = String(format: "%.2f", geometry.pointPixelScale)
 
-    let recsDir: URL = {
-#if DEBUG
-      return URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-        .appendingPathComponent("recs", isDirectory: true)
-#else
-      return URL(fileURLWithPath: NSHomeDirectory())
-        .appendingPathComponent("Desktop", isDirectory: true)
-        .appendingPathComponent("capa", isDirectory: true)
-#endif
-    }()
+    let recsDir = Capa.defaultRecordingDirectory
     try? FileManager.default.createDirectory(at: recsDir, withIntermediateDirectories: true)
 
     var finalProjectName = projectName
