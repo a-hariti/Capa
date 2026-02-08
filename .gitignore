@@ -1,5 +1,4 @@
 capture-*
-gemini-work/
 recs/
 capa
 .build/
@@ -9,3 +8,5 @@ capa
 __pycache__/
 *.pyc
 AGENTS.md
+GEMINI.md
+.DS_Store
